@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { verifyMessage } from "viem";
 
 const port = Number(process.env.PORT || 8787);
 const monitorSecret = process.env.MONITOR_SECRET || "";
-const packets = new Map();
+const evidenceDir = resolve(process.env.EVIDENCE_DIR || "evidence");
+const publicBaseUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 
 function json(response, status, body, headers = {}) {
   response.writeHead(status, {
@@ -13,6 +16,16 @@ function json(response, status, body, headers = {}) {
     ...headers,
   });
   response.end(JSON.stringify(body));
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, value[key]]),
+    ),
+  );
 }
 
 function readBody(request) {
@@ -27,6 +40,33 @@ function readBody(request) {
   });
 }
 
+function packetPath(jobId) {
+  if (!/^[A-Za-z0-9._~-]{1,128}$/.test(jobId)) {
+    throw new Error("invalid job id");
+  }
+  return resolve(evidenceDir, `${jobId}.json`);
+}
+
+async function readPacket(jobId) {
+  try {
+    return JSON.parse(await readFile(packetPath(jobId), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function writePacket(jobId, packet) {
+  await mkdir(evidenceDir, { recursive: true });
+  const target = packetPath(jobId);
+  const temporary = `${target}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(packet, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await rename(temporary, target);
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   if (request.method === "GET" && url.pathname === "/health") {
@@ -34,10 +74,16 @@ const server = createServer(async (request, response) => {
   }
   if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {
     const jobId = decodeURIComponent(url.pathname.slice("/evidence/".length));
-    const packet = packets.get(jobId);
-    return packet
-      ? json(response, 200, packet, { "Access-Control-Allow-Origin": "*" })
-      : json(response, 404, { error: "evidence not found" });
+    try {
+      const packet = await readPacket(jobId);
+      return packet
+        ? json(response, 200, packet, { "Access-Control-Allow-Origin": "*" })
+        : json(response, 404, { error: "evidence not found" });
+    } catch (error) {
+      return json(response, 400, {
+        error: error instanceof Error ? error.message : "invalid evidence id",
+      });
+    }
   }
   if (request.method === "POST" && url.pathname === "/evidence") {
     if (!monitorSecret || request.headers.authorization !== `Bearer ${monitorSecret}`) {
@@ -60,7 +106,7 @@ const server = createServer(async (request, response) => {
         provider: String(payload.provider),
       };
       const receiptHash = createHash("sha256")
-        .update(JSON.stringify(core, Object.keys(core).sort()))
+        .update(canonicalJson(core))
         .digest("hex");
       if (!/^0x[a-fA-F0-9]{40}$/.test(core.provider)) {
         return json(response, 400, { error: "provider must be an address" });
@@ -68,7 +114,7 @@ const server = createServer(async (request, response) => {
       const signature = String(payload.receipt_signature || "");
       const signatureValid = await verifyMessage({
         address: core.provider,
-        message: receiptHash,
+        message: { raw: `0x${receiptHash}` },
         signature,
       });
       if (!signatureValid) {
@@ -79,9 +125,10 @@ const server = createServer(async (request, response) => {
         receipt_signature: signature,
         receipt_hash: receiptHash,
       };
-      packets.set(core.job_id, packet);
+      await writePacket(core.job_id, packet);
+      const evidencePath = `/evidence/${encodeURIComponent(core.job_id)}`;
       return json(response, 201, {
-        evidence_url: `/evidence/${encodeURIComponent(core.job_id)}`,
+        evidence_url: `${publicBaseUrl}${evidencePath}`,
         receipt_hash: receiptHash,
       });
     } catch (error) {

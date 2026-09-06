@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "lint:contracts": "genvm-lint check contracts/Recourse.py",
+    "lint:contracts": ".venv/bin/genvm-lint check contracts/Recourse.py",
     "test": ".venv/bin/pytest tests/direct -q",
     "test:contracts": ".venv/bin/pytest tests/direct -v",
     "test:integration": ".venv/bin/gltest tests/integration -v -s --network studio-dev",
@@ -14,6 +14,7 @@
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
     "deploy:studio-next": "node deploy/deploy.mjs",
     "verify:studio-next": "node deploy/verify.mjs",
+    "smoke:studio-dev": "node scripts/studio-dev-smoke.mjs",
     "dev": "npm --prefix web run dev"
   },
   "dependencies": {

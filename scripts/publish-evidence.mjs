@@ -35,8 +35,15 @@ const core = {
   completed_at: String(packet.completed_at),
   provider: String(packet.provider),
 };
+const canonicalJson = JSON.stringify(
+  Object.fromEntries(
+    Object.keys(core)
+      .sort()
+      .map((key) => [key, core[key]]),
+  ),
+);
 const receiptHash = createHash("sha256")
-  .update(JSON.stringify(core, Object.keys(core).sort()))
+  .update(canonicalJson)
   .digest("hex");
 if (!/^0x[a-fA-F0-9]{40}$/.test(core.provider)) {
   throw new Error("provider must be a 20-byte address");
@@ -45,7 +52,7 @@ const signature = String(packet.receipt_signature);
 if (
   !(await verifyMessage({
     address: core.provider,
-    message: receiptHash,
+    message: { raw: `0x${receiptHash}` },
     signature,
   }))
 ) {
@@ -59,4 +66,5 @@ const result = {
 await mkdir(resolve(root, "evidence"), { recursive: true });
 const outputPath = resolve(root, "evidence", `${core.job_id}.json`);
 await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`);
-console.log(JSON.stringify({ outputPath, evidenceUrl: `/api/evidence/${core.job_id}`, receiptHash }));
+const baseUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+console.log(JSON.stringify({ outputPath, evidenceUrl: `${baseUrl}/evidence/${core.job_id}`, receiptHash }));

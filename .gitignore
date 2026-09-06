@@ -10,7 +10,8 @@ artifacts/
 .gltest_cache/
 __pycache__/
 *.py[cod]
+*.egg-info/
+*.tsbuildinfo
 deploy/addresses.json
 deploy/*.local.json
 web/.env.local
-
