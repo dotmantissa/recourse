@@ -4,8 +4,11 @@ networks:
     url: "http://127.0.0.1:4000/api"
     leader_only: false
   studio-dev:
+    id: 61997
     url: "https://studio-dev.genlayer.com/api"
-    chain_id: 61997
+    accounts:
+      - "0x0000000000000000000000000000000000000000000000000000000000000001"
+    chain_type: "studionet"
     leader_only: false
 
 paths:
@@ -13,4 +16,3 @@ paths:
   artifacts: "artifacts"
 
 environment: ".env"
-
