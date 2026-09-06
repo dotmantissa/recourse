@@ -274,3 +274,73 @@ def test_dispute_consensus_decision_refunds_and_marks_reputation(
     assert reputation["disputed_jobs"] == 1
     assert reputation["breached_jobs"] == 1
     assert reputation["reliability_bps"] < 10000
+
+
+def test_success_receipt_completed_after_deadline_is_a_timeout(
+    direct_vm, direct_deploy, direct_alice, direct_bob, direct_owner
+):
+    contract = direct_deploy("contracts/Recourse.py")
+    capability_id = register_capability(direct_vm, contract, direct_alice)
+    job_id = create_job(direct_vm, contract, direct_bob, capability_id)
+    submit_receipt(
+        direct_vm,
+        contract,
+        direct_alice,
+        job_id,
+        "success",
+        200,
+        1200,
+        True,
+        now=AFTER_DEADLINE,
+        completed_at=AFTER_DEADLINE,
+    )
+    job = json.loads(contract.get_job(job_id))
+    receipt = json.loads(contract.get_receipt(job_id))
+    publish_evidence(
+        direct_vm,
+        contract,
+        direct_owner,
+        job_id,
+        "https://evidence.recourse.example/job-late",
+        evidence_body(job, receipt),
+    )
+
+    set_time(direct_vm, AFTER_DEADLINE)
+    direct_vm.sender = direct_bob
+    contract.settle_job(job_id)
+    assert json.loads(contract.get_job(job_id))["outcome"] == "timeout"
+
+
+def test_provider_cannot_release_success_during_buyer_challenge_window(
+    direct_vm, direct_deploy, direct_alice, direct_bob, direct_owner
+):
+    contract = direct_deploy("contracts/Recourse.py")
+    capability_id = register_capability(direct_vm, contract, direct_alice)
+    job_id = create_job(direct_vm, contract, direct_bob, capability_id)
+    submit_receipt(
+        direct_vm,
+        contract,
+        direct_alice,
+        job_id,
+        now=AFTER_DEADLINE,
+        completed_at="2026-01-01T00:00:20+00:00",
+    )
+    job = json.loads(contract.get_job(job_id))
+    receipt = json.loads(contract.get_receipt(job_id))
+    publish_evidence(
+        direct_vm,
+        contract,
+        direct_owner,
+        job_id,
+        "https://evidence.recourse.example/job-challenge",
+        evidence_body(job, receipt),
+    )
+
+    set_time(direct_vm, AFTER_DEADLINE)
+    direct_vm.sender = direct_alice
+    with direct_vm.expect_revert("challenge window"):
+        contract.settle_job(job_id)
+
+    direct_vm.sender = direct_bob
+    contract.settle_job(job_id)
+    assert json.loads(contract.get_job(job_id))["outcome"] == "success"

@@ -53,8 +53,10 @@ def submit_receipt(
     response_code=200,
     latency_ms=1200,
     schema_valid=True,
+    now=COMPLETED,
+    completed_at=COMPLETED,
 ):
-    set_time(direct_vm, START)
+    set_time(direct_vm, now)
     direct_vm.sender = provider
     direct_vm.value = 0
     return contract.submit_receipt(
@@ -65,7 +67,7 @@ def submit_receipt(
         response_code,
         latency_ms,
         schema_valid,
-        COMPLETED,
+        completed_at,
         "provider-signature-1",
     )
 

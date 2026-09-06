@@ -23,6 +23,7 @@ DISPUTE_RESOLVED = "resolved"
 ALLOWED_RECEIPT_STATUS = ("success", "timeout", "malformed")
 ALLOWED_DISPUTE_TYPES = ("quality", "terms")
 ALLOWED_DECISIONS = ("release", "partial_refund", "full_refund")
+CHALLENGE_WINDOW_SECONDS = 120
 
 
 class Recourse(gl.Contract):
@@ -228,10 +229,17 @@ class Recourse(gl.Contract):
         return evidence
 
     def _objective_refund(self, capability: dict, job: dict, evidence: dict) -> tuple:
+        completed_epoch = self._date_epoch(
+            str(evidence["completed_at"]), "completed_at"
+        )
         deadline_missed = int(evidence["latency_ms"]) > int(
             capability["deadline_seconds"]
         ) * 1000
-        if evidence["response_status"] == "timeout" or deadline_missed:
+        if (
+            evidence["response_status"] == "timeout"
+            or deadline_missed
+            or completed_epoch > u256(int(job["deadline_at"]))
+        ):
             return "timeout", int(capability["timeout_refund_bps"])
         if (
             evidence["response_status"] == "malformed"
@@ -587,6 +595,8 @@ Buyer complaint:
         completed_epoch = self._date_epoch(completed_at, "completed_at")
         if completed_epoch < u256(int(job["funded_at"])):
             raise gl.vm.UserError(ERROR_EXPECTED + " receipt predates the job")
+        if completed_epoch > self._now_epoch():
+            raise gl.vm.UserError(ERROR_EXPECTED + " receipt completion is in the future")
 
         receipt = {
             "job_id": str(job_id),
@@ -604,6 +614,8 @@ Buyer complaint:
         self._save(self.receipts, str(job_id), receipt)
         job["status"] = JOB_RECEIPT_SUBMITTED
         job["receipt_hash"] = receipt_hash
+        job["receipt_submitted_at"] = int(self._now_epoch())
+        job["challenge_deadline_at"] = int(self._now_epoch()) + CHALLENGE_WINDOW_SECONDS
         self._save(self.jobs, str(job_id), job)
         return receipt_hash
 
@@ -667,6 +679,14 @@ Buyer complaint:
             job, receipt, evidence_record["evidence_url"]
         )
         outcome, refund_bps = self._objective_refund(capability, job, evidence)
+        if (
+            refund_bps == 0
+            and str(gl.message.sender_address) != str(job["buyer"])
+            and int(self._now_epoch()) < int(job["challenge_deadline_at"])
+        ):
+            raise gl.vm.UserError(
+                ERROR_EXPECTED + " buyer challenge window has not ended"
+            )
         self._settle(job, capability, refund_bps, outcome, "", [])
 
     @gl.public.write
