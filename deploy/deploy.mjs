@@ -30,7 +30,16 @@ if (chainId !== EXPECTED_CHAIN_ID) {
 }
 
 console.log(`Deploying Recourse from ${account.address} to Studio Dev`);
-const txHash = await client.deployContract({ code: source, args: [] });
+const fees = await client.estimateTransactionFees();
+const txHash = await client.deployContract({
+  code: source,
+  args: [],
+  fees: {
+    distribution: fees.distribution,
+    messageAllocations: fees.messageAllocations,
+    feeValue: fees.feeValue,
+  },
+});
 console.log(`Deployment transaction: ${txHash}`);
 const receipt = await client.waitForTransactionReceipt({
   hash: txHash,
@@ -84,6 +93,7 @@ const metadata = {
   deploymentTransaction: txHash,
   deployedAt: new Date().toISOString(),
   runner,
+  feeValue: String(fees.feeValue),
   sourceSha256,
   counts: JSON.parse(String(counts)),
   schemaMethods: Object.keys(schema?.methods ?? {}).sort(),
@@ -120,4 +130,3 @@ await updateEnv(resolve(root, "web/.env.local"), {
   NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS: address,
 });
 console.log(`Recourse deployed at ${address}`);
-
