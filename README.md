@@ -55,7 +55,7 @@ The stable `studionet` network is intentionally not used. Studio Next is a
 release-candidate environment and may reset. Deployment scripts fail closed if
 the connected chain is not `61997`.
 
-The contract uses the current Studio Dev-compatible pinned GenVM runner dependency. It stores structured state
+The contract uses the Studio Next template's pinned GenVM runner dependency. It stores structured state
 as canonical JSON strings inside GenLayer `TreeMap` and `DynArray` fields.
 Objective evidence is normalized with `strict_eq`; semantic disputes use
 `run_nondet_unsafe` and compare only stable fields:
