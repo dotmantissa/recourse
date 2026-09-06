@@ -1,0 +1,24 @@
+{
+  "name": "recourse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint:contracts": "genvm-lint check contracts/Recourse.py",
+    "test": ".venv/bin/pytest tests/direct -q",
+    "test:contracts": ".venv/bin/pytest tests/direct -v",
+    "test:integration": ".venv/bin/gltest tests/integration -v -s --network studio-dev",
+    "typecheck": "npm --prefix web run typecheck",
+    "build": "npm --prefix web run build",
+    "lint": "npm run lint:contracts && npm --prefix web run lint",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "deploy:studio-next": "node deploy/deploy.mjs",
+    "verify:studio-next": "node deploy/verify.mjs",
+    "dev": "npm --prefix web run dev"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.2",
+    "genlayer-js": "2.0.0-rc.1"
+  }
+}
+

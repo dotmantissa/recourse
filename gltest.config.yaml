@@ -1,0 +1,16 @@
+networks:
+  default: studio-dev
+  localnet:
+    url: "http://127.0.0.1:4000/api"
+    leader_only: false
+  studio-dev:
+    url: "https://studio-dev.genlayer.com/api"
+    chain_id: 61997
+    leader_only: false
+
+paths:
+  contracts: "contracts"
+  artifacts: "artifacts"
+
+environment: ".env"
+

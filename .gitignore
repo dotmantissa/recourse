@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.task-checklist.md
+.venv/
+node_modules/
+web/node_modules/
+web/.next/
+artifacts/
+.gltest_cache/
+__pycache__/
+*.py[cod]
+deploy/addresses.json
+deploy/*.local.json
+web/.env.local
+
