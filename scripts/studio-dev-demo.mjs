@@ -27,6 +27,7 @@ const PUBLIC_EVIDENCE_BASE =
   process.env.PUBLIC_EVIDENCE_BASE?.trim() ||
   `https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/evidence`;
 const DEMO_PRICE = BigInt(process.env.DEMO_PRICE_WEI?.trim() || "10000000000000000");
+const DEMO_FUNDING_RESERVE = 10000000000000000n;
 const DEMO_DIR = resolve(root, ".demo");
 const BUYER_KEY_PATH = resolve(DEMO_DIR, "buyer-key");
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -108,6 +109,35 @@ async function publishPublicEvidence(fileName, body) {
   throw new Error(`Public evidence check failed after publication: ${url}`);
 }
 
+async function fundNative(client, sender, recipient, value) {
+  const nonce = await client.getCurrentNonce({
+    address: sender.address,
+    block: "pending",
+  });
+  const transaction = {
+    account: sender,
+    to: recipient,
+    value,
+    type: "legacy",
+    nonce,
+    gas: 21000n,
+    gasPrice: 0n,
+    chainId: EXPECTED_CHAIN_ID,
+  };
+  const serialized = await sender.signTransaction(transaction);
+  const hash = await client.sendRawTransaction({ serializedTransaction: serialized });
+  const receipt = await client.waitForTransactionReceipt({
+    hash,
+    waitUntil: "finalized",
+    interval: 3000,
+    retries: 240,
+    fullTransaction: true,
+  });
+  if (String(receipt.statusName || receipt.status).toLowerCase() === "reverted") {
+    throw new Error(`Buyer funding finalized with execution failure: ${JSON.stringify(receipt)}`);
+  }
+}
+
 async function main() {
   const addresses = parseJson(
     await readFile(resolve(root, "deploy/addresses.json"), "utf8"),
@@ -184,11 +214,11 @@ async function main() {
 
   const providerBalance = await client.getBalance({ address: provider.address });
   const buyerBalance = await client.getBalance({ address: buyer.address });
-  const minimumBuyerBalance = DEMO_PRICE * 2n + 100000000000000000n;
+  const minimumBuyerBalance = DEMO_PRICE * 2n + DEMO_FUNDING_RESERVE;
   if (buyerBalance < minimumBuyerBalance) {
     const fundingAmount = minimumBuyerBalance - buyerBalance;
     console.log(`Funding demo buyer with ${fundingAmount} wei`);
-    await client.transfer({ to: buyer.address, value: fundingAmount });
+    await fundNative(client, provider, buyer.address, fundingAmount);
   }
   const fundedBuyerBalance = await client.getBalance({ address: buyer.address });
   if (fundedBuyerBalance < minimumBuyerBalance) {
