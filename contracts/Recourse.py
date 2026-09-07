@@ -643,7 +643,7 @@ Buyer complaint:
         self._settle(
             job,
             capability,
-            10000,
+            int(capability["timeout_refund_bps"]),
             "timeout",
             "",
             ["response_deadline"],

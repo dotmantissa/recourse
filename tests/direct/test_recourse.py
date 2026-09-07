@@ -117,6 +117,29 @@ def test_missing_receipt_can_be_refunded_after_deadline(
     assert capability["reserved_collateral_wei"] == 0
 
 
+def test_missing_receipt_uses_configured_timeout_refund(
+    direct_vm, direct_deploy, direct_alice, direct_bob
+):
+    contract = direct_deploy("contracts/Recourse.py")
+    args = capability_args()
+    args[5] = 6500
+    set_time(direct_vm, START)
+    direct_vm.sender = direct_alice
+    direct_vm.value = 10 * 10**18
+    # Use a partial timeout rule so this path cannot silently default to 100%.
+    capability_id = contract.register_capability(*args)
+    job_id = create_job(direct_vm, contract, direct_bob, capability_id)
+
+    set_time(direct_vm, AFTER_DEADLINE)
+    direct_vm.sender = direct_bob
+    direct_vm.value = 0
+    contract.claim_timeout(job_id)
+
+    job = json.loads(contract.get_job(job_id))
+    assert job["refund_bps"] == 6500
+    assert job["rule_ids"] == ["response_deadline"]
+
+
 def test_collateral_capacity_limits_open_jobs(
     direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie
 ):
