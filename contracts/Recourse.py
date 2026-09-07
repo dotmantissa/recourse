@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+import genlayer as gl
 from genlayer import *
 
 
@@ -26,7 +27,7 @@ ALLOWED_DECISIONS = ("release", "partial_refund", "full_refund")
 CHALLENGE_WINDOW_SECONDS = 120
 
 
-class Recourse(gl.Contract):
+class Recourse(gl.contract.Contract):
     """Request-level escrow and GenLayer chargeback settlement."""
 
     owner: Address
@@ -35,16 +36,16 @@ class Recourse(gl.Contract):
     job_seq: u256
     evidence_seq: u256
     dispute_seq: u256
-    capabilities: TreeMap[str, str]
-    capability_order: DynArray[str]
-    jobs: TreeMap[str, str]
-    job_order: DynArray[str]
-    receipts: TreeMap[str, str]
-    evidence: TreeMap[str, str]
-    evidence_order: DynArray[str]
-    disputes: TreeMap[str, str]
-    dispute_order: DynArray[str]
-    reputation: TreeMap[str, str]
+    capabilities: gl.storage.TreeMap[str, str]
+    capability_order: gl.storage.DynArray[str]
+    jobs: gl.storage.TreeMap[str, str]
+    job_order: gl.storage.DynArray[str]
+    receipts: gl.storage.TreeMap[str, str]
+    evidence: gl.storage.TreeMap[str, str]
+    evidence_order: gl.storage.DynArray[str]
+    disputes: gl.storage.TreeMap[str, str]
+    dispute_order: gl.storage.DynArray[str]
+    reputation: gl.storage.TreeMap[str, str]
 
     def __init__(self):
         self.owner = gl.message.sender_address
@@ -86,7 +87,7 @@ class Recourse(gl.Contract):
             raise gl.vm.UserError(ERROR_EXPECTED + f" {field} is too long")
         return url
 
-    def _load(self, table: TreeMap, key: str, label: str) -> dict:
+    def _load(self, table: object, key: str, label: str) -> dict:
         encoded = table.get(str(key).strip(), "")
         if not encoded:
             raise gl.vm.UserError(ERROR_EXPECTED + f" {label} does not exist")
@@ -98,7 +99,7 @@ class Recourse(gl.Contract):
             raise gl.vm.UserError(ERROR_EXPECTED + f" {label} is invalid")
         return value
 
-    def _save(self, table: TreeMap, key: str, value: dict) -> None:
+    def _save(self, table: object, key: str, value: dict) -> None:
         table[str(key)] = json.dumps(value, sort_keys=True)
 
     def _hash(self, value: dict) -> str:
