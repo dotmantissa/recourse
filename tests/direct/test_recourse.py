@@ -225,6 +225,12 @@ def test_objective_settlement_applies_terms(
     assert settled["refund_bps"] == refund_bps
     assert settled["refund_wei"] == PRICE * refund_bps // 10000
     assert settled["provider_payout_wei"] == PRICE - settled["refund_wei"]
+    expected_rules = {
+        "success": [],
+        "timeout": ["response_deadline"],
+        "malformed": ["response_schema"],
+    }
+    assert settled["rule_ids"] == expected_rules[status]
 
 
 def test_dispute_consensus_decision_refunds_and_marks_reputation(
@@ -274,6 +280,47 @@ def test_dispute_consensus_decision_refunds_and_marks_reputation(
     assert reputation["disputed_jobs"] == 1
     assert reputation["breached_jobs"] == 1
     assert reputation["reliability_bps"] < 10000
+
+
+def test_objective_dispute_resolves_without_semantic_adjudication(
+    direct_vm, direct_deploy, direct_alice, direct_bob, direct_owner
+):
+    contract = direct_deploy("contracts/Recourse.py")
+    capability_id = register_capability(direct_vm, contract, direct_alice)
+    job_id = create_job(direct_vm, contract, direct_bob, capability_id)
+    submit_receipt(
+        direct_vm,
+        contract,
+        direct_alice,
+        job_id,
+        status="malformed",
+        schema_valid=False,
+    )
+    job = json.loads(contract.get_job(job_id))
+    receipt = json.loads(contract.get_receipt(job_id))
+    publish_evidence(
+        direct_vm,
+        contract,
+        direct_owner,
+        job_id,
+        "https://evidence.recourse.example/job-objective-dispute",
+        evidence_body(job, receipt),
+    )
+
+    direct_vm.sender = direct_bob
+    dispute_id = contract.open_dispute(
+        job_id,
+        "quality",
+        "The response violates the required output schema.",
+    )
+    contract.resolve_dispute(dispute_id)
+
+    dispute = json.loads(contract.get_dispute(dispute_id))
+    settled_job = json.loads(contract.get_job(job_id))
+    assert dispute["decision"] == "partial_refund"
+    assert dispute["refund_bps"] == 7500
+    assert dispute["rule_ids"] == ["response_schema"]
+    assert settled_job["outcome"] == "malformed"
 
 
 def test_success_receipt_completed_after_deadline_is_a_timeout(

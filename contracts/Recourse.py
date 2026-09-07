@@ -241,21 +241,29 @@ class Recourse(gl.contract.Contract):
             or deadline_missed
             or completed_epoch > u256(int(job["deadline_at"]))
         ):
-            return "timeout", int(capability["timeout_refund_bps"])
+            return (
+                "timeout",
+                int(capability["timeout_refund_bps"]),
+                ["response_deadline"],
+            )
         if (
             evidence["response_status"] == "malformed"
             or not bool(evidence["schema_valid"])
             or int(evidence["response_code"]) < 200
             or int(evidence["response_code"]) >= 300
         ):
-            return "malformed", int(capability["malformed_refund_bps"])
+            return (
+                "malformed",
+                int(capability["malformed_refund_bps"]),
+                ["response_schema"],
+            )
         if (
             evidence["response_status"] == "success"
             and int(evidence["latency_ms"])
             <= int(capability["deadline_seconds"]) * 1000
         ):
-            return "success", 0
-        return "breach", 10000
+            return "success", 0, []
+        return "breach", 10000, ["service_terms"]
 
     def _leader_error_agrees(self, leader_result, leader_fn) -> bool:
         if isinstance(leader_result, gl.vm.Return):
@@ -679,7 +687,9 @@ Buyer complaint:
         evidence = self._verify_evidence(
             job, receipt, evidence_record["evidence_url"]
         )
-        outcome, refund_bps = self._objective_refund(capability, job, evidence)
+        outcome, refund_bps, rule_ids = self._objective_refund(
+            capability, job, evidence
+        )
         if (
             refund_bps == 0
             and str(gl.message.sender_address) != str(job["buyer"])
@@ -688,7 +698,7 @@ Buyer complaint:
             raise gl.vm.UserError(
                 ERROR_EXPECTED + " buyer challenge window has not ended"
             )
-        self._settle(job, capability, refund_bps, outcome, "", [])
+        self._settle(job, capability, refund_bps, outcome, "", rule_ids)
 
     @gl.public.write
     def open_dispute(self, job_id: str, dispute_type: str, complaint: str) -> str:
@@ -743,27 +753,41 @@ Buyer complaint:
         evidence = self._verify_evidence(
             job, receipt, evidence_record["evidence_url"]
         )
-        decision = self._adjudicate(capability, job, dispute, evidence)
-        if not isinstance(decision, dict):
-            raise gl.vm.UserError(ERROR_EXTERNAL + " dispute decision is invalid")
-        refund_bps = int(decision["refund_bps"])
-        if decision["decision"] == "release":
-            refund_bps = 0
-        elif decision["decision"] == "full_refund":
-            refund_bps = 10000
+        objective_outcome, objective_refund_bps, objective_rule_ids = (
+            self._objective_refund(capability, job, evidence)
+        )
+        if objective_refund_bps > 0:
+            refund_bps = objective_refund_bps
+            decision_name = (
+                "full_refund" if refund_bps == 10000 else "partial_refund"
+            )
+            decision_rule_ids = objective_rule_ids
+            settlement_outcome = objective_outcome
+        else:
+            decision = self._adjudicate(capability, job, dispute, evidence)
+            if not isinstance(decision, dict):
+                raise gl.vm.UserError(ERROR_EXTERNAL + " dispute decision is invalid")
+            refund_bps = int(decision["refund_bps"])
+            if decision["decision"] == "release":
+                refund_bps = 0
+            elif decision["decision"] == "full_refund":
+                refund_bps = 10000
+            decision_name = decision["decision"]
+            decision_rule_ids = decision["rule_ids"]
+            settlement_outcome = decision_name
         dispute["status"] = DISPUTE_RESOLVED
-        dispute["decision"] = decision["decision"]
+        dispute["decision"] = decision_name
         dispute["refund_bps"] = refund_bps
-        dispute["rule_ids"] = decision["rule_ids"]
+        dispute["rule_ids"] = decision_rule_ids
         dispute["resolved_at"] = int(self._now_epoch())
         self._save(self.disputes, dispute_id, dispute)
         self._settle(
             job,
             capability,
             refund_bps,
-            decision["decision"],
+            settlement_outcome,
             dispute_id,
-            decision["rule_ids"],
+            decision_rule_ids,
         )
 
     @gl.public.view

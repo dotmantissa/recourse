@@ -124,7 +124,11 @@ export async function write(
     functionName,
     args,
     value,
-    fees: { distribution: fees.distribution, feeValue: fees.feeValue },
+    fees: {
+      distribution: fees.distribution,
+      messageAllocations: fees.messageAllocations,
+      feeValue: fees.feeValue,
+    },
   });
   const receipt = await client.waitForTransactionReceipt({
     hash,
