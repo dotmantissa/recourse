@@ -15,3 +15,5 @@ __pycache__/
 deploy/addresses.json
 deploy/*.local.json
 web/.env.local
+evidence/*.json
+.demo/

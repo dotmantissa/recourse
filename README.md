@@ -95,3 +95,20 @@ npm run verify:studio-next
 ```
 
 Never place a private key in source control or in a `NEXT_PUBLIC_*` variable.
+
+## Live demo
+
+The repeatable Studio Dev demo creates one successful request and one
+malformed-response request. It signs both receipts with the provider key,
+publishes the evidence packets as public files through the authenticated
+`gh`
+CLI, then settles the successful job and resolves the chargeback job.
+
+```bash
+DEPLOYER_KEY=0x... npm run demo:studio-next
+```
+
+The demo uses `DEMO_PRICE_WEI` when set; otherwise it uses `0.01 GEN` so it
+can run on a freshly funded Studio Dev account. Set `GITHUB_REPOSITORY` to a
+different public repository only when the raw evidence URL should point
+elsewhere.
