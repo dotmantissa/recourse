@@ -165,14 +165,22 @@ async function main() {
   }
 
   const write = async (account, functionName, args = [], value = 0n) => {
-    const estimate = await client.estimateTransactionFeesForWrite({
-      account,
-      address: addresses.contractAddress,
-      functionName,
-      args,
-      value,
-      leaderOnly: false,
-    });
+    let estimate;
+    try {
+      estimate = await client.estimateTransactionFeesForWrite({
+        account,
+        address: addresses.contractAddress,
+        functionName,
+        args,
+        value,
+        leaderOnly: false,
+      });
+    } catch {
+      console.warn(
+        `${functionName}: per-write fee simulation unavailable; using generic Studio fee preset`,
+      );
+      estimate = await client.estimateTransactionFees();
+    }
     const hash = await client.writeContract({
       account,
       address: addresses.contractAddress,
@@ -236,49 +244,75 @@ async function main() {
     priceWei: String(DEMO_PRICE),
   }, null, 2));
 
-  const capabilityId = String(await nextId("capabilities"));
-  await write(
-    provider,
-    "register_capability",
-    [
-      "Verified sources demo",
-      "https://research.example.com/v1/sources",
-      "Return five verified sources in JSON within the deadline.",
-      30,
-      '{"type":"array","items":{"type":"object","required":["title","url","citation"]}}',
-      10000,
-      7500,
+  let capabilities = await readJson("get_capabilities");
+  let jobs = await readJson("get_jobs");
+  let capability = capabilities.find(
+    (item) =>
+      item.name === "Verified sources demo" &&
+      item.provider.toLowerCase() === provider.address.toLowerCase() &&
+      String(item.price_wei) === String(DEMO_PRICE),
+  );
+  let capabilityId;
+  if (capability) {
+    capabilityId = String(capability.capability_id);
+  } else {
+    capabilityId = String(await nextId("capabilities"));
+    await write(
+      provider,
+      "register_capability",
+      [
+        "Verified sources demo",
+        "https://research.example.com/v1/sources",
+        "Return five verified sources in JSON within the deadline.",
+        30,
+        '{"type":"array","items":{"type":"object","required":["title","url","citation"]}}',
+        10000,
+        7500,
+        DEMO_PRICE,
+      ],
+      DEMO_PRICE * 3n,
+    );
+    capability = await readJson("get_capability", [capabilityId]);
+  }
+
+  const findOrCreateJob = async (requestHash, requestLabel) => {
+    const existing = jobs.find(
+      (item) =>
+        item.request_hash === requestHash &&
+        item.buyer.toLowerCase() === buyer.address.toLowerCase() &&
+        item.capability_id === capabilityId,
+    );
+    if (existing) return existing;
+    const jobId = String(await nextId("jobs"));
+    await write(
+      buyer,
+      "create_job",
+      [capabilityId, requestHash, requestLabel],
       DEMO_PRICE,
-    ],
-    DEMO_PRICE * 3n,
-  );
+    );
+    return (await readJson("get_jobs")).find((item) => item.job_id === jobId);
+  };
 
-  const successfulJobId = String(await nextId("jobs"));
-  await write(
-    buyer,
-    "create_job",
-    [capabilityId, "demo_request_success", "Find five verified sources"],
-    DEMO_PRICE,
+  const successfulJob = await findOrCreateJob(
+    "demo_request_success",
+    "Find five verified sources",
   );
-
-  const malformedJobId = String(await nextId("jobs"));
-  await write(
-    buyer,
-    "create_job",
-    [capabilityId, "demo_request_malformed", "Find five verified sources with malformed output"],
-    DEMO_PRICE,
+  const malformedJob = await findOrCreateJob(
+    "demo_request_malformed",
+    "Find five verified sources with malformed output",
   );
+  const successfulJobId = String(successfulJob.job_id);
+  const malformedJobId = String(malformedJob.job_id);
 
-  const completedAt = new Date(Date.now() - 1000).toISOString();
-  const makeReceipt = (jobId, outputHash, status, schemaValid, responseCode) => ({
-    job_id: jobId,
-    request_hash: jobId === successfulJobId ? "demo_request_success" : "demo_request_malformed",
+  const makeReceipt = (job, outputHash, status, schemaValid, responseCode) => ({
+    job_id: String(job.job_id),
+    request_hash: String(job.request_hash),
     output_hash: outputHash,
     response_status: status,
     response_code: responseCode,
     latency_ms: 1200,
     schema_valid: schemaValid,
-    completed_at: completedAt,
+    completed_at: new Date((Number(job.funded_at) + 10) * 1000).toISOString(),
     provider: provider.address,
   });
   const signReceipt = async (core) => {
@@ -289,28 +323,24 @@ async function main() {
     return { ...core, receipt_signature: signature, receipt_hash: receiptHash };
   };
 
-  await write(provider, "submit_receipt", [
-    successfulJobId,
-    "demo_request_success",
-    "demo_output_success",
-    "success",
-    200,
-    1200,
-    true,
-    completedAt,
-    (await signReceipt(makeReceipt(successfulJobId, "demo_output_success", "success", true, 200))).receipt_signature,
-  ]);
-  await write(provider, "submit_receipt", [
-    malformedJobId,
-    "demo_request_malformed",
-    "demo_output_malformed",
-    "malformed",
-    200,
-    1200,
-    false,
-    completedAt,
-    (await signReceipt(makeReceipt(malformedJobId, "demo_output_malformed", "malformed", false, 200))).receipt_signature,
-  ]);
+  const submitIfNeeded = async (job, outputHash, status, schemaValid) => {
+    if (job.status !== "funded") return;
+    const core = makeReceipt(job, outputHash, status, schemaValid, 200);
+    const signed = await signReceipt(core);
+    await write(provider, "submit_receipt", [
+      job.job_id,
+      core.request_hash,
+      outputHash,
+      status,
+      200,
+      1200,
+      schemaValid,
+      core.completed_at,
+      signed.receipt_signature,
+    ]);
+  };
+  await submitIfNeeded(successfulJob, "demo_output_success", "success", true);
+  await submitIfNeeded(malformedJob, "demo_output_malformed", "malformed", false);
 
   const receiptSuccess = parseJson(
     await client.readContract({
@@ -330,15 +360,12 @@ async function main() {
     }),
     "malformed receipt",
   );
-  const successCore = makeReceipt(
-    successfulJobId,
-    "demo_output_success",
-    "success",
-    true,
-    200,
-  );
+  jobs = await readJson("get_jobs");
+  const successJob = jobs.find((item) => item.job_id === successfulJobId);
+  const malformedJobState = jobs.find((item) => item.job_id === malformedJobId);
+  const successCore = makeReceipt(successJob, "demo_output_success", "success", true, 200);
   const malformedCore = makeReceipt(
-    malformedJobId,
+    malformedJobState,
     "demo_output_malformed",
     "malformed",
     false,
@@ -357,21 +384,39 @@ async function main() {
   const malformedFile = `demo-${malformedJobId}.json`;
   const successUrl = await publishPublicEvidence(successFile, successEvidence);
   const malformedUrl = await publishPublicEvidence(malformedFile, malformedEvidence);
-  await write(provider, "publish_evidence", [successfulJobId, successUrl]);
-  await write(provider, "publish_evidence", [malformedJobId, malformedUrl]);
+  const evidenceRecords = await readJson("get_evidence_records");
+  if (!evidenceRecords.some((item) => item.job_id === successfulJobId)) {
+    await write(provider, "publish_evidence", [successfulJobId, successUrl]);
+  }
+  if (!evidenceRecords.some((item) => item.job_id === malformedJobId)) {
+    await write(provider, "publish_evidence", [malformedJobId, malformedUrl]);
+  }
 
   console.log("Waiting 31 seconds for the request deadlines...");
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 31_000));
-  const settled = await write(buyer, "settle_job", [successfulJobId]);
-  const disputeId = String(await nextId("disputes"));
-  const dispute = await write(buyer, "open_dispute", [
-    malformedJobId,
-    "quality",
-    "The provider returned an output that violates the required JSON schema.",
-  ]);
-  const resolved = await write(buyer, "resolve_dispute", [disputeId]);
+  jobs = await readJson("get_jobs");
+  const settled =
+    jobs.find((item) => item.job_id === successfulJobId)?.status === "settled"
+      ? { hash: "" }
+      : await write(buyer, "settle_job", [successfulJobId]);
+  let disputes = await readJson("get_disputes");
+  let dispute = disputes.find((item) => item.job_id === malformedJobId);
+  if (!dispute) {
+    await write(buyer, "open_dispute", [
+      malformedJobId,
+      "quality",
+      "The provider returned an output that violates the required JSON schema.",
+    ]);
+    disputes = await readJson("get_disputes");
+    dispute = disputes.find((item) => item.job_id === malformedJobId);
+  }
+  const disputeId = String(dispute.dispute_id);
+  const resolved =
+    dispute.status === "resolved"
+      ? { hash: "" }
+      : await write(buyer, "resolve_dispute", [disputeId]);
 
-  const [successJob, malformedJob, disputeState, counts] = await Promise.all([
+  const [successJobState, malformedJobResult, disputeState, counts] = await Promise.all([
     client.readContract({ address: addresses.contractAddress, functionName: "get_job", args: [successfulJobId], jsonSafeReturn: true }),
     client.readContract({ address: addresses.contractAddress, functionName: "get_job", args: [malformedJobId], jsonSafeReturn: true }),
     client.readContract({ address: addresses.contractAddress, functionName: "get_dispute", args: [disputeId], jsonSafeReturn: true }),
@@ -389,8 +434,8 @@ async function main() {
       disputeOpen: dispute.hash,
       disputeResolution: resolved.hash,
     },
-    successJob: parseJson(successJob, "success job"),
-    malformedJob: parseJson(malformedJob, "malformed job"),
+    successJob: parseJson(successJobState, "success job"),
+    malformedJob: parseJson(malformedJobResult, "malformed job"),
     dispute: parseJson(disputeState, "dispute"),
     counts: parseJson(counts, "counts"),
   }, null, 2));
