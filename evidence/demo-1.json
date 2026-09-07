@@ -1,0 +1,13 @@
+{
+  "job_id": "1",
+  "request_hash": "demo_request_success",
+  "output_hash": "demo_output_success",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 1200,
+  "schema_valid": true,
+  "completed_at": "2026-09-07T04:08:23.000Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0x58b6d8fcc8b6d33e8c568e83f339649578e2cbc1c3fcf1c369428fc24ca3f2894c7df1761fb282c7a6f377ac6772e915bb4da1522ec6d4ca3c6f7e9b80afa37b1c",
+  "receipt_hash": "8ed1b66e5959516e23d96ef9318b7e2a373a6a24937559cf0f36b152d6dd452d"
+}
