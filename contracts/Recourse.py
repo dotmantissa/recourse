@@ -109,7 +109,7 @@ class Recourse(gl.contract.Contract):
 
     def _send_value(self, recipient: Address, amount: u256) -> None:
         if amount > u256(0):
-            gl.contract.get_contract_at(recipient).emit_transfer(
+            gl.contract.get_at(recipient).emit_transfer(
                 value=amount,
                 on="finalized",
             )
