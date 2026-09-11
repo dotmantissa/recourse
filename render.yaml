@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: recourse-evidence
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    rootDir: .
+    buildCommand: npm ci --omit=dev
+    startCommand: node api/server.mjs
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: recourse-evidence-data
+      mountPath: /var/lib/recourse
+      sizeGB: 1
+    envVars:
+      - key: EVIDENCE_DIR
+        value: /var/lib/recourse/evidence
+      - key: FRONTEND_ORIGIN
+        value: https://recourse-gamma.vercel.app
+      - key: RECOURSE_CONTRACT_ADDRESS
+        value: 0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35
+      - key: REQUEST_PRICE_WEI
+        value: "2000000000000000000"
+      - key: MONITOR_SECRET
+        sync: false
+      - key: PRIVY_APP_ID
+        sync: false
+      - key: PRIVY_APP_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false

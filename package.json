@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "api:start": "node api/server.mjs",
+    "api:check": "node --check api/server.mjs",
     "lint:contracts": ".venv/bin/genvm-lint check contracts/Recourse.py",
     "test": ".venv/bin/pytest tests/direct -q",
     "test:contracts": ".venv/bin/pytest tests/direct -v",
