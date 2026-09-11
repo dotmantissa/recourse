@@ -449,8 +449,9 @@ async function main() {
         ]);
   let disputes = await readJson("get_disputes");
   let dispute = disputes.find((item) => item.job_id === malformedJobId);
+  let disputeOpen = { hash: "" };
   if (!dispute) {
-    await write(buyer, "open_dispute", [
+    disputeOpen = await write(buyer, "open_dispute", [
       malformedJobId,
       "quality",
       "The provider returned an output that violates the required JSON schema.",
@@ -482,7 +483,7 @@ async function main() {
     evidence: { successUrl, malformedUrl },
     transactions: {
       successfulSettlement: settled.hash,
-      disputeOpen: dispute.hash,
+      disputeOpen: disputeOpen.hash,
       disputeResolution: resolved.hash,
     },
     successJob: parseJson(successJobState, "success job"),
