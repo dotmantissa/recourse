@@ -209,8 +209,8 @@ export default function Home() {
 
   async function runJobAction(actionName: string, job: Job) {
     const provider = requireWallet();
-    if (actionName === "timeout") await action(`timeout-${job.job_id}`, () => write(address, provider, "claim_timeout", [job.job_id]));
-    if (actionName === "settle") await action(`settle-${job.job_id}`, () => write(address, provider, "settle_job", [job.job_id]));
+    if (actionName === "timeout") await action(`timeout-${job.job_id}`, () => write(address, provider, "claim_timeout", [job.job_id], 0n, [job.buyer]));
+    if (actionName === "settle") await action(`settle-${job.job_id}`, () => write(address, provider, "settle_job", [job.job_id], 0n, [job.buyer, job.provider]));
     if (actionName === "receipt") { setSelectedJob(job); setModal("receipt"); }
     if (actionName === "evidence") { setSelectedJob(job); setModal("evidence"); }
     if (actionName === "dispute") { setSelectedJob(job); setModal("dispute"); }

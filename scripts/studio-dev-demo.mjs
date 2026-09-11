@@ -10,8 +10,10 @@ import { config } from "dotenv";
 import {
   createAccount,
   createClient,
+  encodeInternalMessageFeeParams,
   generatePrivateKey,
   isSuccessful,
+  MessageType,
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 
@@ -28,6 +30,7 @@ const PUBLIC_EVIDENCE_BASE =
   `https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/evidence`;
 const DEMO_PRICE = BigInt(process.env.DEMO_PRICE_WEI?.trim() || "10000000000000000");
 const DEMO_FUNDING_RESERVE = 10000000000000000n;
+const INTERNAL_TRANSFER_BUDGET = 150000000000000000n;
 const DEMO_DIR = resolve(root, ".demo");
 const BUYER_KEY_PATH = resolve(DEMO_DIR, "buyer-key");
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -164,7 +167,43 @@ async function main() {
     throw new Error(`Refusing demo on chain ${chainId}; expected ${EXPECTED_CHAIN_ID}`);
   }
 
-  const write = async (account, functionName, args = [], value = 0n) => {
+  const internalTransferFeeParams = encodeInternalMessageFeeParams({
+    leaderTimeunitsAllocation: 100n,
+    validatorTimeunitsAllocation: 200n,
+    appealRounds: 0n,
+    executionBudgetPerRound: 25000000000000000n,
+    rotations: [3n],
+    maxPriceGenPerTimeUnit: 2n,
+    storageFeeMaxGasPrice: 300000000n,
+    receiptFeeMaxGasPrice: 300000000n,
+  });
+  const transferAllocations = (recipients) =>
+    [...new Set(recipients.map((recipient) => recipient.toLowerCase()))].map(
+      (recipient) => ({
+        messageType: MessageType.Internal,
+        onAcceptance: false,
+        recipient,
+        callKey: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        budget: INTERNAL_TRANSFER_BUDGET,
+        feeParams: internalTransferFeeParams,
+      }),
+    );
+  const write = async (
+    account,
+    functionName,
+    args = [],
+    value = 0n,
+    messageRecipients = [],
+  ) => {
+    const messageAllocations = transferAllocations(messageRecipients);
+    const feeOptions =
+      messageAllocations.length > 0
+        ? {
+            totalMessageFees:
+              INTERNAL_TRANSFER_BUDGET * BigInt(messageAllocations.length),
+            messageAllocations,
+          }
+        : {};
     let estimate;
     try {
       estimate = await client.estimateTransactionFeesForWrite({
@@ -174,12 +213,13 @@ async function main() {
         args,
         value,
         leaderOnly: false,
+        ...feeOptions,
       });
     } catch {
       console.warn(
         `${functionName}: per-write fee simulation unavailable; using generic Studio fee preset`,
       );
-      estimate = await client.estimateTransactionFees();
+      estimate = await client.estimateTransactionFees(feeOptions);
     }
     const hash = await client.writeContract({
       account,
@@ -222,7 +262,12 @@ async function main() {
 
   const providerBalance = await client.getBalance({ address: provider.address });
   const buyerBalance = await client.getBalance({ address: buyer.address });
-  const minimumBuyerBalance = DEMO_PRICE * 2n + DEMO_FUNDING_RESERVE;
+  const maxPayoutFee = await client.estimateTransactionFees({
+    totalMessageFees: INTERNAL_TRANSFER_BUDGET * 2n,
+    messageAllocations: transferAllocations([buyer.address, provider.address]),
+  });
+  const minimumBuyerBalance =
+    DEMO_PRICE * 2n + maxPayoutFee.feeValue + DEMO_FUNDING_RESERVE;
   if (buyerBalance < minimumBuyerBalance) {
     const fundingAmount = minimumBuyerBalance - buyerBalance;
     console.log(`Funding demo buyer with ${fundingAmount} wei`);
@@ -398,7 +443,10 @@ async function main() {
   const settled =
     jobs.find((item) => item.job_id === successfulJobId)?.status === "settled"
       ? { hash: "" }
-      : await write(buyer, "settle_job", [successfulJobId]);
+      : await write(buyer, "settle_job", [successfulJobId], 0n, [
+          successJob.provider,
+          successJob.buyer,
+        ]);
   let disputes = await readJson("get_disputes");
   let dispute = disputes.find((item) => item.job_id === malformedJobId);
   if (!dispute) {
@@ -414,7 +462,10 @@ async function main() {
   const resolved =
     dispute.status === "resolved"
       ? { hash: "" }
-      : await write(buyer, "resolve_dispute", [disputeId]);
+      : await write(buyer, "resolve_dispute", [disputeId], 0n, [
+          malformedJobState.provider,
+          malformedJobState.buyer,
+        ]);
 
   const [successJobState, malformedJobResult, disputeState, counts] = await Promise.all([
     client.readContract({ address: addresses.contractAddress, functionName: "get_job", args: [successfulJobId], jsonSafeReturn: true }),

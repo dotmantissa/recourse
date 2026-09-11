@@ -1,6 +1,10 @@
 "use client";
 
-import { createClient } from "genlayer-js";
+import {
+  createClient,
+  encodeInternalMessageFeeParams,
+  MessageType,
+} from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 import JSONbig from "json-bigint";
 import { CONTRACT_ADDRESS, RPC_URL } from "./config";
@@ -109,16 +113,48 @@ export async function write(
   functionName: string,
   args: CalldataEncodable[] = [],
   value = 0n,
+  messageRecipients: string[] = [],
 ) {
   if (!CONTRACT_ADDRESS) throw new Error("Deploy Recourse and set the contract address first.");
   const client = writer(address, provider);
-  const fees = await client.estimateTransactionFeesForWrite({
-    address: CONTRACT_ADDRESS as `0x${string}`,
-    functionName,
-    args,
-    value,
-    leaderOnly: false,
-  });
+  const uniqueRecipients = [...new Set(messageRecipients.map((item) => item.toLowerCase()))];
+  const messageAllocations = uniqueRecipients.map((recipient) => ({
+    messageType: MessageType.Internal,
+    onAcceptance: false,
+    recipient: recipient as `0x${string}`,
+    callKey: "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+    budget: 150000000000000000n,
+    feeParams: encodeInternalMessageFeeParams({
+      leaderTimeunitsAllocation: 100n,
+      validatorTimeunitsAllocation: 200n,
+      appealRounds: 0n,
+      executionBudgetPerRound: 25000000000000000n,
+      rotations: [3n],
+      maxPriceGenPerTimeUnit: 2n,
+      storageFeeMaxGasPrice: 300000000n,
+      receiptFeeMaxGasPrice: 300000000n,
+    }),
+  }));
+  const feeOptions =
+    messageAllocations.length > 0
+      ? {
+          totalMessageFees: 150000000000000000n * BigInt(messageAllocations.length),
+          messageAllocations,
+        }
+      : {};
+  let fees;
+  try {
+    fees = await client.estimateTransactionFeesForWrite({
+      address: CONTRACT_ADDRESS as `0x${string}`,
+      functionName,
+      args,
+      value,
+      leaderOnly: false,
+      ...feeOptions,
+    });
+  } catch {
+    fees = await client.estimateTransactionFees(feeOptions);
+  }
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS as `0x${string}`,
     functionName,
