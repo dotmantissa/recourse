@@ -4,6 +4,7 @@ export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_RECOURSE_CHAIN_ID ?? "619
 export const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS ?? "";
 export const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 export const MONITOR_ADDRESS = process.env.NEXT_PUBLIC_RECOURSE_MONITOR_ADDRESS ?? "";
+export const ADAPTER_URL = process.env.NEXT_PUBLIC_RECOURSE_ADAPTER_URL ?? "";
 export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export function shortAddress(value: string) {
