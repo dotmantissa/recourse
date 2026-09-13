@@ -18,6 +18,7 @@
     "verify:studio-next": "node deploy/verify.mjs",
     "smoke:studio-dev": "node scripts/studio-dev-smoke.mjs",
     "demo:studio-next": "node scripts/studio-dev-demo.mjs",
+    "register:agents": "node scripts/register-agents.mjs",
     "dev": "npm --prefix web run dev"
   },
   "dependencies": {

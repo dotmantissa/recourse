@@ -40,6 +40,15 @@ export type AppState = {
 };
 
 let reader: ReturnType<typeof createClient> | null = null;
+const READ_CACHE_TTL_MS = 15_000;
+const REPUTATION_CACHE_TTL_MS = 60_000;
+const READ_MIN_INTERVAL_MS = 350;
+const READ_WINDOW_MS = 60_000;
+const MAX_READS_PER_WINDOW = 24;
+const readCache = new Map<string, { value: unknown; expiresAt: number }>();
+const readInFlight = new Map<string, Promise<unknown>>();
+let readQueue = Promise.resolve();
+const readTimestamps: number[] = [];
 
 function getReader() {
   reader ??= createClient({ chain: studioDevnet, endpoint: RPC_URL });
@@ -61,14 +70,93 @@ function canonicalJson(value: Record<string, unknown>) {
   return JSON.stringify(ordered);
 }
 
+function scheduleRead<T>(operation: () => Promise<T>): Promise<T> {
+  const run = readQueue.then(async () => {
+    while (true) {
+      const now = Date.now();
+      while (readTimestamps[0] && now - readTimestamps[0] >= READ_WINDOW_MS) {
+        readTimestamps.shift();
+      }
+      if (readTimestamps.length < MAX_READS_PER_WINDOW) {
+        const elapsed = Date.now() - (readTimestamps.at(-1) ?? 0);
+        if (elapsed < READ_MIN_INTERVAL_MS) {
+          await new Promise((resolve) =>
+            globalThis.setTimeout(resolve, READ_MIN_INTERVAL_MS - elapsed),
+          );
+        }
+        readTimestamps.push(Date.now());
+        return operation();
+      }
+      const waitMs = READ_WINDOW_MS - (Date.now() - readTimestamps[0]) + 50;
+      await new Promise((resolve) => globalThis.setTimeout(resolve, waitMs));
+    }
+  });
+  readQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 async function read(functionName: string, args: CalldataEncodable[] = []) {
   if (!CONTRACT_ADDRESS) return "";
-  return getReader().readContract({
-    address: CONTRACT_ADDRESS as `0x${string}`,
-    functionName,
-    args,
-    jsonSafeReturn: true,
+  const key = `${functionName}:${JSON.stringify(args, (_, value) => typeof value === "bigint" ? `${value}n` : value)}`;
+  const cached = readCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const existing = readInFlight.get(key);
+  if (existing) return existing;
+
+  const request = (async () => {
+    let attempt = 0;
+    while (true) {
+      try {
+        const value = await scheduleRead(() =>
+          getReader().readContract({
+            address: CONTRACT_ADDRESS as `0x${string}`,
+            functionName,
+            args,
+            jsonSafeReturn: true,
+          }),
+        );
+        readCache.set(key, { value, expiresAt: Date.now() + READ_CACHE_TTL_MS });
+        return value;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (!/rate limit|too many requests|429/i.test(message) || attempt >= 2) {
+          if (cached) return cached.value;
+          throw cause;
+        }
+        await new Promise((resolve) =>
+          globalThis.setTimeout(resolve, 4000 * (attempt + 1)),
+        );
+        attempt += 1;
+      }
+    }
+  })();
+  readInFlight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    readInFlight.delete(key);
+  }
+}
+
+export function clearReadCache() {
+  readCache.clear();
+}
+
+export async function hashRequest(capabilityId: string, requestLabel: string) {
+  const canonical = canonicalJson({
+    capability_id: String(capabilityId),
+    request_label: String(requestLabel).trim(),
+    version: "recourse-request-v1",
   });
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  const hex = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `sha256:${hex}`;
 }
 
 export async function loadState(): Promise<AppState> {
@@ -78,16 +166,10 @@ export async function loadState(): Promise<AppState> {
     read("get_evidence_records"),
     read("get_disputes"),
   ]);
-  const jobList = parse<Job[]>(jobs || "[]");
-  const receiptPairs = await Promise.all(
-    jobList
-      .filter((job) => job.receipt_hash)
-      .map(async (job) => [job.job_id, parse<Receipt>(await read("get_receipt", [job.job_id]))] as const),
-  );
   return {
     capabilities: parse<Capability[]>(capabilities || "[]"),
-    jobs: jobList,
-    receipts: Object.fromEntries(receiptPairs),
+    jobs: parse<Job[]>(jobs || "[]"),
+    receipts: {},
     evidence: parse<EvidenceRecord[]>(evidence || "[]"),
     disputes: parse<Dispute[]>(disputes || "[]"),
   };
@@ -95,7 +177,12 @@ export async function loadState(): Promise<AppState> {
 
 export async function readReputation(address: string): Promise<Reputation | null> {
   if (!CONTRACT_ADDRESS || !address) return null;
-  return parse<Reputation>(await read("get_reputation", [address]));
+  const key = `reputation:${address.toLowerCase()}`;
+  const cached = readCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return parse<Reputation>(cached.value);
+  const value = await read("get_reputation", [address]);
+  readCache.set(key, { value, expiresAt: Date.now() + REPUTATION_CACHE_TTL_MS });
+  return parse<Reputation>(value);
 }
 
 function writer(address: string, provider: WalletProvider) {
@@ -177,6 +264,7 @@ export async function write(
   if (result && result !== "FINISHED_WITH_RETURN") {
     throw new Error(`Transaction finalized with execution result ${result}.`);
   }
+  clearReadCache();
   return String(hash);
 }
 

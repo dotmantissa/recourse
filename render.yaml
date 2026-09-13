@@ -25,6 +25,8 @@ services:
         value: "2000000000000000000"
       - key: MONITOR_SECRET
         sync: false
+      - key: AGENT_SIGNING_KEY
+        sync: false
       - key: PRIVY_APP_ID
         sync: false
       - key: PRIVY_APP_SECRET

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import {
   ArrowDownRight,
@@ -43,6 +43,7 @@ import {
 } from "@/lib/config";
 import {
   loadState,
+  hashRequest,
   readReputation,
   signReceipt,
   write,
@@ -348,24 +349,42 @@ function PrivyHome() {
 
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? wallets[0];
   const address = embeddedWallet?.address ?? "";
+  const refreshInFlight = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(async () => {
-    setError("");
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const operation = (async () => {
+      setError("");
+      try {
+        const next = await loadState();
+        setState(next);
+        if (address) setReputation(await readReputation(address));
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "The Studio Next state could not be loaded.");
+      }
+    })();
+    refreshInFlight.current = operation;
     try {
-      const next = await loadState();
-      setState(next);
-      if (address) setReputation(await readReputation(address));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The Studio Next state could not be loaded.");
+      await operation;
+    } finally {
+      if (refreshInFlight.current === operation) refreshInFlight.current = null;
     }
+    return operation;
   }, [address]);
 
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => void refresh(), 0);
-    const timer = window.setInterval(() => void refresh(), 15000);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 30000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.clearTimeout(initialRefresh);
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [refresh]);
 
@@ -427,7 +446,8 @@ function PrivyHome() {
     event.preventDefault();
     if (!selectedCapability) return;
     const context = await walletContext();
-    await action("job", () => write(context.address, context.provider, "create_job", [selectedCapability.capability_id, jobForm.requestHash || `request-${Date.now()}`, jobForm.label], asWei(selectedCapability.price_wei)));
+    const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label);
+    await action("job", () => write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei)));
   }
 
   async function submitReceipt(event: React.FormEvent<HTMLFormElement>) {
@@ -597,7 +617,7 @@ function PrivyHome() {
       )}
 
       {modal === "register" && <ModalShell eyebrow="Provider entry" title="Register a capability" onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void register(event)}><div className="form-grid"><Field label="Capability name" name="name" value={registerForm.name} onChange={(value) => setRegisterForm({ ...registerForm, name: value })} /><Field label="Public endpoint" name="endpoint" value={registerForm.endpoint} onChange={(value) => setRegisterForm({ ...registerForm, endpoint: value })} /><Field label="Deadline (seconds)" name="deadline" type="number" value={registerForm.deadline} onChange={(value) => setRegisterForm({ ...registerForm, deadline: value })} /><Field label="Price (GEN)" name="price" value={registerForm.price} onChange={(value) => setRegisterForm({ ...registerForm, price: value })} /><Field label="Collateral (GEN)" name="collateral" value={registerForm.collateral} onChange={(value) => setRegisterForm({ ...registerForm, collateral: value })} /><Field label="Timeout refund (%)" name="timeout" type="number" value={registerForm.timeout} onChange={(value) => setRegisterForm({ ...registerForm, timeout: value })} /><Field label="Malformed refund (%)" name="malformed" type="number" value={registerForm.malformed} onChange={(value) => setRegisterForm({ ...registerForm, malformed: value })} /></div><label className="field"><span>Terms</span><textarea value={registerForm.terms} onChange={(event) => setRegisterForm({ ...registerForm, terms: event.target.value })} /></label><label className="field"><span>Required output schema</span><textarea value={registerForm.schema} onChange={(event) => setRegisterForm({ ...registerForm, schema: event.target.value })} /></label><div className="modal-actions"><span className="modal-note">Collateral is held by Recourse until the request resolves.</span><button className="button button-acid" disabled={busy === "register"} type="submit">{busy === "register" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Register</button></div></form></ModalShell>}
-      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Provider receives it only after evidence and the challenge window.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><Field label="Request hash" name="requestHash" value={jobForm.requestHash} onChange={(value) => setJobForm({ ...jobForm, requestHash: value })} placeholder="sha256:..." required={false} /><div className="modal-actions"><span className="modal-note">Privy signs this Studio Next transaction.</span><button className="button button-acid" disabled={busy === "job"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund escrow</button></div></form></ModalShell>}
+      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Provider receives it only after evidence and the challenge window.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><div className="hash-note"><span className="mono">request identity</span><strong>generated automatically</strong><p>Recourse hashes this capability and request label before funding. The same identifier travels through the provider receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs this Studio Next transaction.</span><button className="button button-acid" disabled={busy === "job"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund escrow</button></div></form></ModalShell>}
       {modal === "receipt" && selectedJob && <ModalShell eyebrow="Provider execution" title={`Submit receipt for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void submitReceipt(event)}><Field label="Output hash" name="outputHash" value={receiptForm.outputHash} onChange={(value) => setReceiptForm({ ...receiptForm, outputHash: value })} placeholder="sha256:..." /><div className="form-grid"><label className="field"><span>Response status</span><select value={receiptForm.status} onChange={(event) => setReceiptForm({ ...receiptForm, status: event.target.value })}><option value="success">Success</option><option value="timeout">Timeout</option><option value="malformed">Malformed</option></select></label><Field label="HTTP status" name="code" type="number" value={receiptForm.code} onChange={(value) => setReceiptForm({ ...receiptForm, code: value })} /><Field label="Latency (ms)" name="latency" type="number" value={receiptForm.latency} onChange={(value) => setReceiptForm({ ...receiptForm, latency: value })} /></div><label className="check-field"><input type="checkbox" checked={receiptForm.schemaValid} onChange={(event) => setReceiptForm({ ...receiptForm, schemaValid: event.target.checked })} /> Output matched the required schema</label><div className="modal-actions"><span className="modal-note">Your embedded wallet signs the canonical receipt.</span><button className="button button-acid" disabled={busy === "receipt"} type="submit">{busy === "receipt" ? <LoaderCircle className="spin" size={15} /> : <FileCheck2 size={15} />} Sign and commit</button></div></form></ModalShell>}
       {modal === "evidence" && selectedJob && <ModalShell eyebrow="Monitor evidence" title={`Publish evidence for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void publishEvidence(event)}><Field label="Public evidence URL" name="url" value={evidenceForm.url} onChange={(value) => setEvidenceForm({ url: value })} placeholder="https://adapter.example.com/evidence/..." /><div className="evidence-callout"><ScanLine size={18} /><span>Validators fetch this JSON themselves. It must match the provider’s signed receipt exactly.</span></div><div className="modal-actions"><span className="modal-note">Monitor access is enforced by the contract.</span><button className="button button-acid" disabled={busy === "evidence"} type="submit">{busy === "evidence" ? <LoaderCircle className="spin" size={15} /> : <ScanLine size={15} />} Publish evidence</button></div></form></ModalShell>}
       {modal === "dispute" && selectedJob && <ModalShell eyebrow="Onchain justice" title={`Open recourse for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void openDispute(event)}><label className="field"><span>Dispute type</span><select value={disputeForm.type} onChange={(event) => setDisputeForm({ ...disputeForm, type: event.target.value })}><option value="quality">Quality</option><option value="terms">Terms</option></select></label><label className="field"><span>Complaint</span><textarea value={disputeForm.complaint} onChange={(event) => setDisputeForm({ ...disputeForm, complaint: event.target.value })} required /></label><div className="modal-actions"><span className="modal-note">Validators receive the signed evidence and complaint.</span><button className="button button-acid" disabled={busy === "dispute"} type="submit">{busy === "dispute" ? <LoaderCircle className="spin" size={15} /> : <Gavel size={15} />} Open dispute</button></div></form></ModalShell>}

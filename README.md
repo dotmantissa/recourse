@@ -112,3 +112,40 @@ The demo uses `DEMO_PRICE_WEI` when set; otherwise it uses `0.01 GEN` so it
 can run on a freshly funded Studio Dev account. Set `GITHUB_REPOSITORY` to a
 different public repository only when the raw evidence URL should point
 elsewhere.
+
+## Live test agents
+
+The adapter exposes five bounded service agents. They use real public inputs
+and return real results; they are not seeded or mocked responses:
+
+- `research-sources`: queries Crossref and returns five citable sources.
+- `citation-validator`: fetches submitted URLs and reports reachability.
+- `json-repair`: validates a JSON document against required keys.
+- `code-policy`: runs bounded static policy checks on source code.
+- `page-brief`: fetches a public page and returns a title, excerpt, and key
+  phrases.
+
+The capability definitions are recorded in `agents/manifest.json`. After the
+adapter is publicly deployed, register them on Studio Next with:
+
+```bash
+RECOURSE_ADAPTER_URL=https://your-adapter.onrender.com \
+DEPLOYER_KEY=0x... \
+npm run register:agents
+```
+
+Each execution requires the funded job identity in headers:
+
+```bash
+curl -X POST "$RECOURSE_ADAPTER_URL/agents/research-sources/execute" \
+  -H 'content-type: application/json' \
+  -H 'x-recourse-job-id: 1' \
+  -H 'x-recourse-request-hash: sha256:...' \
+  --data '{"query":"verifiable credentials"}'
+```
+
+The response includes the live agent output, a provider-signed receipt, and a
+public evidence URL. The provider then submits that receipt to the matching
+Recourse job and the monitor publishes the evidence URL onchain. The
+adapter never changes the network: all contract and payment operations remain
+on Studio Next / chain `61997`.

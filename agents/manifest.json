@@ -1,0 +1,51 @@
+{
+  "network": "studio-next",
+  "chain_id": 61997,
+  "agents": [
+    {
+      "slug": "research-sources",
+      "name": "Source Scout",
+      "terms": "Return five citable sources for the supplied research question as JSON. Each item must include title, URL, and citation.",
+      "schema": "{\"type\":\"object\",\"required\":[\"query\",\"sources\"],\"properties\":{\"query\":{\"type\":\"string\"},\"sources\":{\"type\":\"array\",\"minItems\":5,\"maxItems\":5}}}",
+      "deadline_seconds": 30,
+      "timeout_refund_bps": 10000,
+      "malformed_refund_bps": 7500
+    },
+    {
+      "slug": "citation-validator",
+      "name": "Citation Auditor",
+      "terms": "Check each supplied public source URL and return reachability, status, title, and an aggregate verdict as JSON.",
+      "schema": "{\"type\":\"object\",\"required\":[\"claim\",\"checks\",\"verdict\"],\"properties\":{\"claim\":{\"type\":\"string\"},\"checks\":{\"type\":\"array\"},\"verdict\":{\"type\":\"string\"}}}",
+      "deadline_seconds": 30,
+      "timeout_refund_bps": 10000,
+      "malformed_refund_bps": 7500
+    },
+    {
+      "slug": "json-repair",
+      "name": "Schema Mechanic",
+      "terms": "Validate and normalize the supplied JSON document against the supplied required key list. Never invent missing values.",
+      "schema": "{\"type\":\"object\",\"required\":[\"valid\",\"normalized\",\"missing_keys\"],\"properties\":{\"valid\":{\"type\":\"boolean\"},\"normalized\":{},\"missing_keys\":{\"type\":\"array\"}}}",
+      "deadline_seconds": 15,
+      "timeout_refund_bps": 10000,
+      "malformed_refund_bps": 7500
+    },
+    {
+      "slug": "code-policy",
+      "name": "Code Sentinel",
+      "terms": "Run the declared static policy checks against the supplied source code and return findings with rule, severity, and line.",
+      "schema": "{\"type\":\"object\",\"required\":[\"language\",\"score\",\"findings\"],\"properties\":{\"language\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\"},\"findings\":{\"type\":\"array\"}}}",
+      "deadline_seconds": 20,
+      "timeout_refund_bps": 10000,
+      "malformed_refund_bps": 7500
+    },
+    {
+      "slug": "page-brief",
+      "name": "Page Brief",
+      "terms": "Fetch the supplied public page and return a bounded title, excerpt, and key phrase list as JSON.",
+      "schema": "{\"type\":\"object\",\"required\":[\"url\",\"title\",\"excerpt\",\"key_phrases\"],\"properties\":{\"url\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"excerpt\":{\"type\":\"string\"},\"key_phrases\":{\"type\":\"array\"}}}",
+      "deadline_seconds": 30,
+      "timeout_refund_bps": 10000,
+      "malformed_refund_bps": 7500
+    }
+  ]
+}

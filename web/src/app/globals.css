@@ -600,6 +600,10 @@ em { color: var(--acid); font-style: normal; }
 .escrow-callout, .evidence-callout { align-items: start; background: #e7f5b9; color: #334200; display: flex; gap: 11px; padding: 14px; }
 .escrow-callout strong { display: block; font-size: 13px; margin-bottom: 4px; }
 .escrow-callout span, .evidence-callout span { display: block; font-size: 12px; line-height: 1.45; }
+.hash-note { border: 1px solid var(--line-dark); padding: 13px 14px; }
+.hash-note .mono { color: #697067; display: block; font-size: 9px; margin-bottom: 5px; text-transform: uppercase; }
+.hash-note strong { display: block; font-size: 13px; margin-bottom: 5px; }
+.hash-note p { color: #697067; font-size: 11px; line-height: 1.5; margin: 0; }
 .check-field { align-items: center; color: #4f584c; display: flex; font-size: 12px; gap: 8px; }
 .check-field input { accent-color: #719300; }
 .spin { animation: spin .9s linear infinite; }
