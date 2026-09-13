@@ -1,0 +1,13 @@
+{
+  "job_id": "verify-page-2",
+  "request_hash": "sha256:verify-page-2",
+  "output_hash": "sha256:42992d01f35d2e8ed016a0b7e3b59d8c03d3099b90d269c22560e051b6304d1a",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 98,
+  "schema_valid": true,
+  "completed_at": "2026-09-13T01:48:40.236Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0x19cf00e8fb4546a485e788834b09f9b7cb29ca184cfba33ae2d967265d723a1d3c704e3ab33bfc900ffd8a2a4bf514b3f559013b78bf04cbcc437db11dfe8ad31b",
+  "receipt_hash": "3ce6234e0d393cd2636272de77fc326f8bca8db6ff0a8a91277560b9802dac46"
+}
