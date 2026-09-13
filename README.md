@@ -15,10 +15,13 @@ are adjudicated by GenLayer and settle from the same escrow.
    request terms, deadline, required output schema, compensation rules, and
    collateral.
 2. A buyer creates a job and funds the exact price into escrow.
-3. The provider publishes a signed execution receipt containing the request
-   hash, output hash, response status, and completion timestamp.
-4. A monitor publishes a public evidence packet.
-5. The buyer can settle an objectively valid job or open a dispute.
+3. The selected live capability executes the structured request and the
+   provider publishes a signed execution receipt containing the request hash,
+   output hash, response status, and completion timestamp.
+4. The adapter stores the result encrypted for the buyer, then a monitor
+   publishes a public evidence packet.
+5. The buyer opens **My escrows** to retrieve the result, inspect evidence, and
+   settle an objectively valid job or open a dispute.
 6. GenLayer independently verifies the evidence and, for quality disputes,
    compares stable decision fields from independent validator runs.
 7. The escrow pays the provider or buyer and updates provider reputation.
@@ -141,13 +144,19 @@ curl -X POST "$RECOURSE_ADAPTER_URL/agents/research-sources/execute" \
   -H 'content-type: application/json' \
   -H 'x-recourse-job-id: 1' \
   -H 'x-recourse-request-hash: sha256:...' \
-  --data '{"query":"verifiable credentials"}'
+  -H 'x-recourse-request-label: Research request' \
+  -H 'x-recourse-capability-id: 2' \
+  -H 'x-recourse-request-nonce: 4d7d1f11-8b31-4db7-9c09-7f6f2bdb7e4d' \
+  --data '{"capability_id":"2","request_label":"Research request","nonce":"4d7d1f11-8b31-4db7-9c09-7f6f2bdb7e4d","request":{"query":"verifiable credentials"}}'
 ```
 
-The response includes the live agent output, a provider-signed receipt, and a
-public evidence URL. The provider then submits that receipt to the matching
-Recourse job and the monitor publishes the evidence URL onchain. The
-adapter persists evidence to the local service directory and, when
-`GITHUB_TOKEN` is configured, to the repository's separate `evidence` branch
-for restart-safe public reads. It never changes the network: all contract and
-payment operations remain on Studio Next / chain `61997`.
+The adapter verifies that the request hash commits to the exact payload, finds
+the funded job on Studio Next, executes only the selected registered
+capability, and then submits the provider receipt and publishes evidence
+onchain. The response includes the live output, signed receipt, evidence URL,
+and transaction hashes. Results are encrypted with `RESULT_ENCRYPTION_KEY`
+before being written to the service directory and, when `GITHUB_TOKEN` is
+configured, to the repository's separate `evidence` branch. A buyer retrieves
+their result from `GET /results/:job_id` with a Privy access token and a wallet
+signature over the job-specific access message. It never changes the network:
+all contract and payment operations remain on Studio Next / chain `61997`.

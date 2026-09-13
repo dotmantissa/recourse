@@ -83,3 +83,32 @@ export type Reputation = {
   refunded_wei: number | string;
   reliability_bps: number;
 };
+
+export type CapabilityRequest = Record<string, unknown>;
+
+export type JobResult = {
+  job_id: string;
+  capability_id: string;
+  request_hash: string;
+  request_label: string;
+  request: CapabilityRequest | null;
+  output: unknown;
+  receipt: {
+    job_id: string;
+    request_hash: string;
+    output_hash: string;
+    response_status: string;
+    response_code: number;
+    latency_ms: number;
+    schema_valid: boolean;
+    completed_at: string;
+    provider: string;
+  };
+  receipt_hash: string;
+  receipt_signature: string;
+  evidence_url: string;
+  receipt_tx_hash: string | null;
+  evidence_tx_hash: string | null;
+  onchain_job?: Job;
+  stored_at: string;
+};

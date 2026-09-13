@@ -1,14 +1,24 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { resolve } from "node:path";
+import {
+  createClient,
+  encodeInternalMessageFeeParams,
+  isSuccessful,
+  MessageType,
+} from "genlayer-js";
+import { studioDevnet } from "genlayer-js/chains";
+import { PrivyClient } from "@privy-io/node";
 import { privateKeyToAccount } from "viem/accounts";
 import { verifyMessage } from "viem";
 
 const PORT = Number(process.env.PORT || 8787);
 const MONITOR_SECRET = process.env.MONITOR_SECRET || "";
 const EVIDENCE_DIR = resolve(process.env.EVIDENCE_DIR || "evidence");
+const RESULT_DIR = resolve(process.env.RESULT_DIR || "results");
+const RESULT_ENCRYPTION_KEY = process.env.RESULT_ENCRYPTION_KEY || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "").replace(/\/+$/, "");
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
@@ -22,6 +32,8 @@ const CONTRACT_ADDRESS =
 const CHAIN_ID = 61997;
 const RPC_URL = "https://studio-dev.genlayer.com/api";
 const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
+const PRIVY_APP_ID = process.env.PRIVY_APP_ID || "";
+const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET || "";
 const MAX_BODY_BYTES = 100_000;
 const ALLOWED_STATUSES = new Set(["success", "timeout", "malformed"]);
 const AGENT_DEFINITIONS = {
@@ -70,6 +82,8 @@ const AGENT_DEFINITIONS = {
 const agentAccount = /^0x[0-9a-fA-F]{64}$/.test(AGENT_SIGNING_KEY)
   ? privateKeyToAccount(AGENT_SIGNING_KEY)
   : null;
+let chainClient = null;
+let privyClient = null;
 let githubWriteQueue = Promise.resolve();
 
 function corsHeaders(request, isPublic = false) {
@@ -83,7 +97,7 @@ function corsHeaders(request, isPublic = false) {
   return allowedOrigin
     ? {
         "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Headers": "authorization, content-type, x-payment",
+        "Access-Control-Allow-Headers": "authorization, content-type, x-payment, x-recourse-job-id, x-recourse-request-hash, x-recourse-request-label, x-recourse-capability-id, x-recourse-request-nonce, x-recourse-wallet, x-recourse-signature",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
         Vary: "Origin",
       }
@@ -106,6 +120,68 @@ function canonicalJson(value) {
     return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function hashRequest(capabilityId, requestLabel, request, nonce) {
+  const canonical = canonicalJson({
+    capability_id: String(capabilityId),
+    request: request ?? null,
+    request_label: String(requestLabel).trim(),
+    nonce: String(nonce).trim(),
+    version: "recourse-request-v2",
+  });
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
+function resultPath(jobId) {
+  if (!/^[A-Za-z0-9._~-]{1,128}$/.test(jobId)) {
+    throw new Error("invalid job id");
+  }
+  return resolve(RESULT_DIR, `${jobId}.json`);
+}
+
+function encryptionKey() {
+  if (/^[a-fA-F0-9]{64}$/.test(RESULT_ENCRYPTION_KEY)) {
+    return Buffer.from(RESULT_ENCRYPTION_KEY, "hex");
+  }
+  try {
+    const decoded = Buffer.from(RESULT_ENCRYPTION_KEY, "base64");
+    if (decoded.length === 32) return decoded;
+  } catch {}
+  throw new Error("RESULT_ENCRYPTION_KEY must be a 32-byte hex or base64 secret");
+}
+
+function encryptResult(value) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(value), "utf8"),
+    cipher.final(),
+  ]);
+  return {
+    version: 1,
+    algorithm: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+function decryptResult(packet) {
+  if (packet?.version !== 1 || packet?.algorithm !== "aes-256-gcm") {
+    throw new Error("stored result format is invalid");
+  }
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    encryptionKey(),
+    Buffer.from(String(packet.iv), "base64"),
+  );
+  decipher.setAuthTag(Buffer.from(String(packet.tag), "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(String(packet.ciphertext), "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+  return JSON.parse(plaintext);
 }
 
 function readBody(request) {
@@ -146,6 +222,27 @@ function authorized(request) {
   const expected = Buffer.from(MONITOR_SECRET);
   const actual = Buffer.from(supplied);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function getPrivyClient() {
+  if (!PRIVY_APP_ID || !PRIVY_APP_SECRET) {
+    throw new Error("Privy server authentication is not configured");
+  }
+  privyClient ??= new PrivyClient({
+    appId: PRIVY_APP_ID,
+    appSecret: PRIVY_APP_SECRET,
+  });
+  return privyClient;
+}
+
+async function authenticate(request) {
+  const token = String(request.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
+  if (!token) throw new Error("Privy access token is required");
+  return getPrivyClient().utils().auth().verifyAccessToken(token);
+}
+
+function resultAccessMessage(jobId, requestHash) {
+  return `Recourse result access: ${jobId}:${requestHash}`;
 }
 
 function parseInteger(value, field, minimum = 0) {
@@ -382,6 +479,20 @@ async function readPacket(jobId) {
   }
 }
 
+async function readGithubFile(directory, jobId) {
+  if (!GITHUB_TOKEN) return null;
+  try {
+    const response = await githubRequest(
+      `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
+    );
+    if (!response.ok) return null;
+    const body = await response.json();
+    return JSON.parse(Buffer.from(String(body.content || "").replace(/\n/g, ""), "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
 async function githubRequest(path, options = {}) {
   return fetch(`https://api.github.com${path}`, {
     ...options,
@@ -417,10 +528,14 @@ async function ensureGithubEvidenceBranch() {
 }
 
 async function writeGithubPacket(jobId, packet) {
+  await writeGithubFile("evidence", jobId, packet, `Publish Recourse evidence ${jobId}`);
+}
+
+async function writeGithubFile(directory, jobId, packet, message) {
   if (!GITHUB_TOKEN) return;
   const operation = githubWriteQueue.then(async () => {
     await ensureGithubEvidenceBranch();
-    const path = `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json`;
+    const path = `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json`;
     const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
     let sha;
     if (existing.ok) sha = (await existing.json()).sha;
@@ -429,7 +544,7 @@ async function writeGithubPacket(jobId, packet) {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        message: `Publish Recourse evidence ${jobId}`,
+        message,
         content: Buffer.from(`${JSON.stringify(packet, null, 2)}\n`).toString("base64"),
         branch: GITHUB_EVIDENCE_BRANCH,
         ...(sha ? { sha } : {}),
@@ -453,6 +568,29 @@ async function writePacket(jobId, packet) {
   await rename(temporary, target);
 }
 
+async function readResult(jobId) {
+  try {
+    return decryptResult(JSON.parse(await readFile(resultPath(jobId), "utf8")));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const stored = await readGithubFile("results", jobId);
+  return stored ? decryptResult(stored) : null;
+}
+
+async function writeResult(jobId, result) {
+  const encrypted = encryptResult(result);
+  await mkdir(RESULT_DIR, { recursive: true });
+  await writeGithubFile("results", jobId, encrypted, `Store Recourse result ${jobId}`);
+  const target = resultPath(jobId);
+  const temporary = `${target}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(encrypted, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await rename(temporary, target);
+}
+
 function paymentRequirement() {
   return {
     version: "1",
@@ -469,6 +607,200 @@ function paymentRequirement() {
 }
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
+await mkdir(RESULT_DIR, { recursive: true });
+
+function getChainClient() {
+  if (!agentAccount) throw new Error("agent signing is not configured");
+  chainClient ??= createClient({
+    chain: studioDevnet,
+    endpoint: RPC_URL,
+    account: agentAccount,
+  });
+  return chainClient;
+}
+
+async function readChainJson(functionName, args = []) {
+  const value = await getChainClient().readContract({
+    address: CONTRACT_ADDRESS,
+    functionName,
+    args,
+    jsonSafeReturn: true,
+  });
+  if (!value) return null;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    throw new Error(`${functionName} returned invalid JSON`);
+  }
+}
+
+function transferAllocations(recipients) {
+  const feeParams = encodeInternalMessageFeeParams({
+    leaderTimeunitsAllocation: 100n,
+    validatorTimeunitsAllocation: 200n,
+    appealRounds: 0n,
+    executionBudgetPerRound: 25000000000000000n,
+    rotations: [3n],
+    maxPriceGenPerTimeUnit: 2n,
+    storageFeeMaxGasPrice: 300000000n,
+    receiptFeeMaxGasPrice: 300000000n,
+  });
+  return [...new Set(recipients.map((recipient) => recipient.toLowerCase()))].map(
+    (recipient) => ({
+      messageType: MessageType.Internal,
+      onAcceptance: false,
+      recipient,
+      callKey: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      budget: 150000000000000000n,
+      feeParams,
+    }),
+  );
+}
+
+async function writeChain(functionName, args = [], value = 0n, recipients = []) {
+  const client = getChainClient();
+  const messageAllocations = transferAllocations(recipients);
+  const feeOptions = messageAllocations.length > 0
+    ? {
+        totalMessageFees: 150000000000000000n * BigInt(messageAllocations.length),
+        messageAllocations,
+      }
+    : {};
+  let fees;
+  try {
+    fees = await client.estimateTransactionFeesForWrite({
+      address: CONTRACT_ADDRESS,
+      functionName,
+      args,
+      value,
+      leaderOnly: false,
+      ...feeOptions,
+    });
+  } catch {
+    fees = await client.estimateTransactionFees(feeOptions);
+  }
+  const hash = await client.writeContract({
+    address: CONTRACT_ADDRESS,
+    functionName,
+    args,
+    value,
+    fees: {
+      distribution: fees.distribution,
+      messageAllocations: fees.messageAllocations,
+      feeValue: fees.feeValue,
+    },
+  });
+  const receipt = await client.waitForTransactionReceipt({
+    hash,
+    waitUntil: "finalized",
+    interval: 3000,
+    retries: 240,
+    fullTransaction: true,
+  });
+  if (!isSuccessful(receipt)) {
+    throw new Error(`${functionName} finalized with execution failure`);
+  }
+  return String(hash);
+}
+
+async function fundedJob(slug, jobId, requestHash) {
+  const job = await readChainJson("get_job", [jobId]);
+  const capability = job
+    ? await readChainJson("get_capability", [String(job.capability_id)])
+    : null;
+  if (!job || !capability) throw new Error("funded job could not be found on Studio Next");
+  if (job.status !== "funded") throw new Error(`job is ${job.status}, not funded`);
+  if (String(job.request_hash).toLowerCase() !== requestHash.toLowerCase()) {
+    throw new Error("request hash does not match the funded job");
+  }
+  if (String(job.provider).toLowerCase() !== String(agentAccount.address).toLowerCase()) {
+    throw new Error("this capability is served by a different provider");
+  }
+  const expectedPath = AGENT_DEFINITIONS[slug].endpoint;
+  if (new URL(String(capability.endpoint)).pathname !== expectedPath) {
+    throw new Error("funded job capability endpoint does not match this agent route");
+  }
+  return { job, capability };
+}
+
+async function completeAgentJob(slug, payload, request, response) {
+  const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
+  const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
+  const requestLabel = assertString(request.headers["x-recourse-request-label"], "x-recourse-request-label", 1, 240);
+  const capabilityId = assertString(request.headers["x-recourse-capability-id"], "x-recourse-capability-id", 1, 64);
+  const nonce = assertString(request.headers["x-recourse-request-nonce"], "x-recourse-request-nonce", 8, 128);
+  const requestPayload = payload.request ?? null;
+  if (String(payload.capability_id) !== capabilityId || String(payload.request_label).trim() !== requestLabel || String(payload.nonce).trim() !== nonce) {
+    throw new Error("request commitment metadata is inconsistent");
+  }
+  if (hashRequest(capabilityId, requestLabel, requestPayload, nonce) !== requestHash) {
+    throw new Error("request payload does not match the funded request hash");
+  }
+  const { job } = await fundedJob(slug, jobId, requestHash);
+  const existing = await readResult(jobId);
+  let result = existing;
+  let receiptTxHash = "";
+  let evidenceTxHash = "";
+  if (!result) {
+    const startedAt = Date.now();
+    const output = await executeAgent(slug, {
+      ...requestPayload,
+      job_id: jobId,
+      request_hash: requestHash,
+    });
+    const signed = await signedAgentReceipt(slug, {
+      job_id: jobId,
+      request_hash: requestHash,
+    }, output, startedAt, agentAccount.address);
+    result = {
+      job_id: jobId,
+      capability_id: capabilityId,
+      request_hash: requestHash,
+      request_label: requestLabel,
+      request: requestPayload,
+      output: signed.output,
+      receipt: signed.receipt,
+      receipt_hash: signed.receipt_hash,
+      receipt_signature: signed.receipt_signature,
+      stored_at: new Date().toISOString(),
+    };
+    await writeResult(jobId, result);
+    const evidencePacket = {
+      ...signed.receipt,
+      receipt_signature: signed.receipt_signature,
+      receipt_hash: signed.receipt_hash,
+    };
+    await writePacket(jobId, evidencePacket);
+  }
+
+  let latestJob = await readChainJson("get_job", [jobId]);
+  if (latestJob?.status === "funded") {
+    receiptTxHash = await writeChain("submit_receipt", [
+      jobId,
+      result.receipt.request_hash,
+      result.receipt.output_hash,
+      result.receipt.response_status,
+      BigInt(result.receipt.response_code),
+      BigInt(result.receipt.latency_ms),
+      result.receipt.schema_valid,
+      result.receipt.completed_at,
+      result.receipt_signature,
+    ]);
+    latestJob = await readChainJson("get_job", [jobId]);
+  }
+  if (latestJob?.status === "receipt_submitted" && !latestJob.evidence_id) {
+    const evidenceUrl = `${requestBaseUrl(request)}/evidence/${encodeURIComponent(jobId)}`;
+    evidenceTxHash = await writeChain("publish_evidence", [jobId, evidenceUrl]);
+    latestJob = await readChainJson("get_job", [jobId]);
+  }
+  return {
+    ...result,
+    evidence_url: `${requestBaseUrl(request)}/evidence/${encodeURIComponent(jobId)}`,
+    receipt_tx_hash: receiptTxHash || null,
+    evidence_tx_hash: evidenceTxHash || null,
+    onchain_job: latestJob,
+  };
+}
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -495,6 +827,7 @@ const server = createServer(async (request, response) => {
         endpoints: {
           health: "GET /health",
           evidence: "GET /evidence/:job_id",
+          result: "GET /results/:job_id",
           publish_evidence: "POST /evidence",
           x402: "POST /x402/request",
         },
@@ -516,7 +849,9 @@ const server = createServer(async (request, response) => {
           chain_id: CHAIN_ID,
           storage: "ready",
           durable_evidence: Boolean(GITHUB_TOKEN),
+          durable_results: Boolean(GITHUB_TOKEN && RESULT_ENCRYPTION_KEY),
           privy_configured: Boolean(process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET),
+          result_encryption_configured: Boolean(RESULT_ENCRYPTION_KEY),
         },
         publicCors,
       );
@@ -572,35 +907,55 @@ const server = createServer(async (request, response) => {
     }
     try {
       const payload = JSON.parse(await readBody(request));
-      const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
-      const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
-      const executionPayload = { ...payload, job_id: jobId, request_hash: requestHash };
-      const startedAt = Date.now();
-      const output = await executeAgent(slug, executionPayload);
-      const result = await signedAgentReceipt(slug, executionPayload, output, startedAt, agentAccount.address);
-      const evidencePacket = {
-        ...result.receipt,
-        receipt_signature: result.receipt_signature,
-        receipt_hash: result.receipt_hash,
-      };
-      const existing = await readPacket(jobId);
-      if (existing && existing.receipt_hash !== result.receipt_hash) {
-        return json(response, 409, { error: "job already has a different agent receipt" }, publicCors);
-      }
-      if (!existing) await writePacket(jobId, evidencePacket);
+      const result = await completeAgentJob(slug, payload, request, response);
       return json(response, 200, {
         agent: slug,
         network: "studio-next",
         chain_id: CHAIN_ID,
-        evidence_url: `${requestBaseUrl(request)}/evidence/${encodeURIComponent(jobId)}`,
         ...result,
       }, publicCors);
     } catch (error) {
       return json(
         response,
-        422,
+        /request|job|commitment|capability|configured/i.test(error?.message || "") ? 422 : 502,
         { error: error instanceof Error ? error.message : "agent execution failed" },
         publicCors,
+      );
+    }
+  }
+
+  if (request.method === "GET" && url.pathname.startsWith("/results/")) {
+    const jobId = decodeURIComponent(url.pathname.slice("/results/".length));
+    try {
+      const claims = await authenticate(request);
+      const job = await readChainJson("get_job", [jobId]);
+      if (!job) return json(response, 404, { error: "job not found" }, restrictedCors);
+      const wallet = String(request.headers["x-recourse-wallet"] || "").trim();
+      const signature = String(request.headers["x-recourse-signature"] || "").trim();
+      if (!/^0x[a-fA-F0-9]{40}$/.test(wallet) || wallet.toLowerCase() !== String(job.buyer).toLowerCase()) {
+        return json(response, 403, { error: "result belongs to a different buyer" }, restrictedCors);
+      }
+      if (!signature) {
+        return json(response, 401, { error: "wallet authorization is required" }, restrictedCors);
+      }
+      const verified = await verifyMessage({
+        address: wallet,
+        message: resultAccessMessage(job.job_id, job.request_hash),
+        signature,
+      });
+      if (!verified) return json(response, 403, { error: "wallet authorization is invalid" }, restrictedCors);
+      const result = await readResult(jobId);
+      if (!result) return json(response, 404, { error: "result is not available yet", user_id: claims.user_id }, restrictedCors);
+      if (String(result.request_hash).toLowerCase() !== String(job.request_hash).toLowerCase()) {
+        return json(response, 409, { error: "stored result does not match the funded request" }, restrictedCors);
+      }
+      return json(response, 200, result, restrictedCors);
+    } catch (error) {
+      return json(
+        response,
+        /Privy|token|authentication/i.test(error?.message || "") ? 401 : 400,
+        { error: error instanceof Error ? error.message : "result access failed" },
+        restrictedCors,
       );
     }
   }

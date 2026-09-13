@@ -13,6 +13,10 @@ services:
     envVars:
       - key: EVIDENCE_DIR
         value: evidence
+      - key: RESULT_DIR
+        value: results
+      - key: RESULT_ENCRYPTION_KEY
+        sync: false
       - key: FRONTEND_ORIGIN
         value: https://recourse-gamma.vercel.app
       - key: RECOURSE_CONTRACT_ADDRESS

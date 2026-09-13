@@ -22,6 +22,7 @@
     "dev": "npm --prefix web run dev"
   },
   "dependencies": {
+    "@privy-io/node": "^0.34.0",
     "dotenv": "^17.2.2",
     "genlayer-js": "2.0.0-rc.1",
     "viem": "^2.56.3"

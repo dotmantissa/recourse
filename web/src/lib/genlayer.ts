@@ -7,7 +7,7 @@ import {
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 import JSONbig from "json-bigint";
-import { CONTRACT_ADDRESS, RPC_URL } from "./config";
+import { ADAPTER_URL, CONTRACT_ADDRESS, RPC_URL } from "./config";
 import type {
   Capability,
   Dispute,
@@ -15,6 +15,8 @@ import type {
   Job,
   Receipt,
   Reputation,
+  CapabilityRequest,
+  JobResult,
 } from "./types";
 
 export type CalldataEncodable =
@@ -61,13 +63,12 @@ function parse<T>(value: unknown): T {
   return typeof value === "string" ? (jsonParser.parse(value) as T) : (value as T);
 }
 
-function canonicalJson(value: Record<string, unknown>) {
-  const ordered = Object.fromEntries(
-    Object.keys(value)
-      .sort()
-      .map((key) => [key, value[key]]),
-  );
-  return JSON.stringify(ordered);
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function scheduleRead<T>(operation: () => Promise<T>): Promise<T> {
@@ -143,11 +144,18 @@ export function clearReadCache() {
   readCache.clear();
 }
 
-export async function hashRequest(capabilityId: string, requestLabel: string) {
+export async function hashRequest(
+  capabilityId: string,
+  requestLabel: string,
+  request: CapabilityRequest | null,
+  nonce: string,
+) {
   const canonical = canonicalJson({
     capability_id: String(capabilityId),
+    request: request ?? null,
     request_label: String(requestLabel).trim(),
-    version: "recourse-request-v1",
+    nonce: String(nonce).trim(),
+    version: "recourse-request-v2",
   });
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
@@ -157,6 +165,69 @@ export async function hashRequest(capabilityId: string, requestLabel: string) {
     byte.toString(16).padStart(2, "0"),
   ).join("");
   return `sha256:${hex}`;
+}
+
+export function resultAccessMessage(jobId: string, requestHash: string) {
+  return `Recourse result access: ${jobId}:${requestHash}`;
+}
+
+export async function executeFundedCapability(
+  capability: Capability,
+  job: Job,
+  request: CapabilityRequest | null,
+  nonce: string,
+): Promise<JobResult> {
+  const requestHash = await hashRequest(capability.capability_id, job.request_label, request, nonce);
+  const response = await fetch(capability.endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-recourse-job-id": job.job_id,
+      "x-recourse-request-hash": requestHash,
+      "x-recourse-request-label": job.request_label,
+      "x-recourse-capability-id": capability.capability_id,
+      "x-recourse-request-nonce": nonce,
+    },
+    body: JSON.stringify({
+      capability_id: capability.capability_id,
+      request_label: job.request_label,
+      nonce,
+      request,
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(String(body?.error || `Capability execution failed (${response.status}).`));
+  }
+  return body as JobResult;
+}
+
+export async function fetchJobResult(
+  job: Job,
+  accessToken: string,
+  provider: WalletProvider,
+  address: string,
+): Promise<JobResult> {
+  const signature = await provider.request({
+    method: "personal_sign",
+    params: [resultAccessMessage(job.job_id, job.request_hash), address],
+  });
+  if (typeof signature !== "string" || !signature) {
+    throw new Error("The wallet did not authorize access to this result.");
+  }
+  if (!ADAPTER_URL) throw new Error("The result adapter is not configured.");
+  const response = await fetch(`${ADAPTER_URL}/results/${encodeURIComponent(job.job_id)}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "x-recourse-wallet": address,
+      "x-recourse-signature": signature,
+    },
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(String(body?.error || `Result retrieval failed (${response.status}).`));
+  }
+  return body as JobResult;
 }
 
 export async function loadState(): Promise<AppState> {

@@ -43,6 +43,8 @@ import {
 } from "@/lib/config";
 import {
   loadState,
+  executeFundedCapability,
+  fetchJobResult,
   hashRequest,
   readReputation,
   signReceipt,
@@ -50,11 +52,11 @@ import {
   type AppState,
   type WalletProvider,
 } from "@/lib/genlayer";
-import type { Capability, Job, Reputation } from "@/lib/types";
+import type { Capability, CapabilityRequest, Job, JobResult, Reputation } from "@/lib/types";
 
-type View = "console" | "guide";
+type View = "console" | "guide" | "dashboard";
 type Lens = "all" | "buyer" | "provider" | "disputes";
-type Modal = "register" | "job" | "receipt" | "evidence" | "dispute" | "none";
+type Modal = "register" | "job" | "receipt" | "evidence" | "dispute" | "logout" | "none";
 
 const emptyState: AppState = {
   capabilities: [],
@@ -81,6 +83,51 @@ function statusTone(status: string) {
 function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
+
+function capabilitySlug(capability: Capability) {
+  return capability.endpoint.split("/agents/")[1]?.split("/")[0] ?? "";
+}
+
+function requestPayload(capability: Capability, form: typeof defaultJobForm): CapabilityRequest | null {
+  const slug = capabilitySlug(capability);
+  if (slug === "research-sources") return { query: form.query.trim() };
+  if (slug === "citation-validator") {
+    return {
+      claim: form.claim.trim(),
+      sources: form.sources.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
+    };
+  }
+  if (slug === "json-repair") {
+    let document: unknown = form.document;
+    try {
+      document = JSON.parse(form.document);
+    } catch {}
+    return {
+      document,
+      required_keys: form.requiredKeys.split(",").map((item) => item.trim()).filter(Boolean),
+    };
+  }
+  if (slug === "code-policy") return { language: form.language, code: form.code };
+  if (slug === "page-brief") return { url: form.url.trim() };
+  try {
+    return JSON.parse(form.raw || "{}") as CapabilityRequest;
+  } catch {
+    throw new Error("Advanced request JSON must be valid JSON.");
+  }
+}
+
+const defaultJobForm = {
+  label: "Return five verified sources in JSON",
+  query: "How can autonomous agents verify external sources?",
+  claim: "The cited sources support the supplied claim.",
+  sources: "https://genlayer.com\nhttps://docs.genlayer.com",
+  document: '{"title":"Recourse","url":"https://recourse-gamma.vercel.app"}',
+  requiredKeys: "title,url,citation",
+  language: "javascript",
+  code: "export function safe(value) { return value; }",
+  url: "https://docs.genlayer.com/",
+  raw: "{}",
+};
 
 function ModalShell({
   title,
@@ -318,8 +365,134 @@ function Guide() {
   );
 }
 
+function BuyerDashboard({
+  authenticated,
+  address,
+  jobs,
+  capabilities,
+  evidence,
+  results,
+  resultBusy,
+  onConnect,
+  onResult,
+  onAction,
+}: {
+  authenticated: boolean;
+  address: string;
+  jobs: Job[];
+  capabilities: Capability[];
+  evidence: AppState["evidence"];
+  results: Record<string, JobResult | null>;
+  resultBusy: string;
+  onConnect: () => void;
+  onResult: (job: Job) => void;
+  onAction: (action: string, job: Job) => void;
+}) {
+  const buyerJobs = jobs.filter((job) => job.buyer.toLowerCase() === address.toLowerCase()).sort((a, b) => Number(b.job_id) - Number(a.job_id));
+  if (!authenticated || !address) {
+    return (
+      <section className="dashboard-view">
+        <div className="dashboard-empty">
+          <span className="eyebrow">Private workspace</span>
+          <h1>Your escrows, from funding to result.</h1>
+          <p>Sign in with an embedded Studio Next wallet to see only the requests you funded, their receipts, public evidence, and final settlement.</p>
+          <button className="button button-acid large" onClick={onConnect}><KeyRound size={16} /> Sign in to open dashboard</button>
+        </div>
+      </section>
+    );
+  }
+  return (
+    <section className="dashboard-view">
+      <div className="dashboard-intro">
+        <div>
+          <span className="eyebrow">Buyer workspace / private</span>
+          <h1>Every escrow has a visible next step.</h1>
+        </div>
+        <p>Results arrive here after the funded capability runs. The request hash is your portable receipt identity; the evidence link is what GenLayer validators inspect.</p>
+      </div>
+      <div className="dashboard-address"><WalletCards size={15} /><span className="mono">{address}</span><span>Studio Next / {CHAIN_ID}</span></div>
+      <div className="dashboard-list">
+        {buyerJobs.length ? buyerJobs.map((job) => {
+          const capability = capabilities.find((item) => item.capability_id === job.capability_id);
+          const evidenceRecord = evidence.find((item) => item.evidence_id === job.evidence_id);
+          const result = results[job.job_id];
+          return (
+            <article className="dashboard-job" key={job.job_id}>
+              <div className="dashboard-job-top">
+                <div>
+                  <span className="mono dashboard-job-id">JOB {job.job_id} · {job.request_hash}</span>
+                  <h2>{job.request_label}</h2>
+                  <p>{capability?.name ?? `Capability ${job.capability_id}`} · {formatGen(job.escrow_wei)} protected</p>
+                </div>
+                <StatusMark status={job.status} />
+              </div>
+              <div className="dashboard-meta">
+                <div><span>funded</span><strong>{formatDate(job.funded_at)}</strong></div>
+                <div><span>deadline</span><strong>{formatDate(job.deadline_at)}</strong></div>
+                <div><span>outcome</span><strong>{job.outcome ? `${statusLabel(job.outcome)} · ${bps(job.refund_bps)} back` : "awaiting settlement"}</strong></div>
+              </div>
+              <div className="dashboard-job-footer">
+                <div className="dashboard-links">
+                  {evidenceRecord && <a className="text-link" href={evidenceRecord.evidence_url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> Public evidence</a>}
+                  <button className="text-link" onClick={() => onResult(job)} disabled={resultBusy === job.job_id}>{resultBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <FileCheck2 size={14} />} {result ? "Refresh result" : "Reveal result"}</button>
+                </div>
+                <div className="dashboard-actions">
+                  {job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-dark small" onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> Settle</button>}
+                </div>
+              </div>
+              {result && (
+                <div className="result-drawer">
+                  <div className="result-drawer-head"><span className="eyebrow">Delivered output</span><span className="mono">{result.receipt.output_hash}</span></div>
+                  <pre><code>{JSON.stringify(result.output, null, 2)}</code></pre>
+                  <div className="result-receipt"><span><BadgeCheck size={14} /> signed receipt verified by adapter</span><span>{result.receipt.latency_ms}ms · {result.receipt.response_status}</span></div>
+                </div>
+              )}
+            </article>
+          );
+        }) : (
+          <div className="dashboard-empty dashboard-empty-small">
+            <LockKeyhole size={24} />
+            <h2>No funded requests yet.</h2>
+            <p>Choose a capability in the console. Once escrow finalizes, the request will appear here and its result will land in this workspace.</p>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function JobRequestFields({
+  capability,
+  form,
+  onChange,
+}: {
+  capability: Capability;
+  form: typeof defaultJobForm;
+  onChange: (next: typeof defaultJobForm) => void;
+}) {
+  const slug = capabilitySlug(capability);
+  if (slug === "research-sources") {
+    return <Field label="Research question" name="query" value={form.query} onChange={(value) => onChange({ ...form, query: value })} placeholder="What should the source agent investigate?" />;
+  }
+  if (slug === "citation-validator") {
+    return <><Field label="Claim to check" name="claim" value={form.claim} onChange={(value) => onChange({ ...form, claim: value })} /><label className="field"><span>Public source URLs</span><textarea value={form.sources} onChange={(event) => onChange({ ...form, sources: event.target.value })} placeholder="One URL per line" /></label></>;
+  }
+  if (slug === "json-repair") {
+    return <><label className="field"><span>JSON document</span><textarea value={form.document} onChange={(event) => onChange({ ...form, document: event.target.value })} /></label><Field label="Required keys" name="requiredKeys" value={form.requiredKeys} onChange={(value) => onChange({ ...form, requiredKeys: value })} placeholder="title,url,citation" /></>;
+  }
+  if (slug === "code-policy") {
+    return <><label className="field"><span>Language</span><select value={form.language} onChange={(event) => onChange({ ...form, language: event.target.value })}><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option><option value="python">Python</option></select></label><label className="field"><span>Source code</span><textarea value={form.code} onChange={(event) => onChange({ ...form, code: event.target.value })} /></label></>;
+  }
+  if (slug === "page-brief") {
+    return <Field label="Public page URL" name="url" value={form.url} onChange={(value) => onChange({ ...form, url: value })} placeholder="https://..." />;
+  }
+  return <label className="field"><span>Request JSON</span><textarea value={form.raw} onChange={(event) => onChange({ ...form, raw: event.target.value })} placeholder='{"input":"value"}' /></label>;
+}
+
 function PrivyHome() {
-  const { ready, authenticated, login, logout } = usePrivy();
+  const { ready, authenticated, login, logout, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
   const [view, setView] = useState<View>("console");
   const [lens, setLens] = useState<Lens>("all");
@@ -331,6 +504,8 @@ function PrivyHome() {
   const [modal, setModal] = useState<Modal>("none");
   const [selectedCapability, setSelectedCapability] = useState<Capability | null>(null);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [results, setResults] = useState<Record<string, JobResult | null>>({});
+  const [resultBusy, setResultBusy] = useState("");
   const [registerForm, setRegisterForm] = useState({
     name: "Verified source research",
     endpoint: "https://api.example.com/research",
@@ -342,7 +517,7 @@ function PrivyHome() {
     price: "2",
     collateral: "10",
   });
-  const [jobForm, setJobForm] = useState({ requestHash: "", label: "Return five verified sources in JSON" });
+  const [jobForm, setJobForm] = useState(defaultJobForm);
   const [receiptForm, setReceiptForm] = useState({ outputHash: "", status: "success", code: "200", latency: "1200", schemaValid: true, completedAt: "" });
   const [evidenceForm, setEvidenceForm] = useState({ url: "" });
   const [disputeForm, setDisputeForm] = useState({ type: "quality", complaint: "The returned sources do not support the requested claims." });
@@ -442,12 +617,40 @@ function PrivyHome() {
     await action("register", () => write(context.address, context.provider, "register_capability", [registerForm.name, registerForm.endpoint, registerForm.terms, BigInt(registerForm.deadline), registerForm.schema, BigInt(registerForm.timeout) * 100n, BigInt(registerForm.malformed) * 100n, parseGen(registerForm.price)], parseGen(registerForm.collateral)));
   }
 
+  async function findJob(requestHash: string, buyer: string) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const snapshot = await loadState();
+      const job = snapshot.jobs.find((item) => item.request_hash.toLowerCase() === requestHash.toLowerCase() && item.buyer.toLowerCase() === buyer.toLowerCase());
+      if (job) return job;
+      await new Promise((resolve) => window.setTimeout(resolve, 1800));
+    }
+    throw new Error("The funded job finalized, but its job record was not readable yet. Refresh the dashboard to continue.");
+  }
+
   async function createJob(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedCapability) return;
-    const context = await walletContext();
-    const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label);
-    await action("job", () => write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei)));
+    setBusy("job");
+    setError("");
+    setNotice("");
+    try {
+      const context = await walletContext();
+      const request = requestPayload(selectedCapability, jobForm);
+      const nonce = crypto.randomUUID();
+      const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label, request, nonce);
+      await write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei));
+      const job = await findJob(requestHash, context.address);
+      const result = await executeFundedCapability(selectedCapability, job, request, nonce);
+      setResults((current) => ({ ...current, [job.job_id]: result }));
+      setNotice(`Job ${job.job_id} executed. Your result is ready in My escrows.`);
+      setView("dashboard");
+      setModal("none");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The funded request could not be completed.");
+    } finally {
+      setBusy("");
+    }
   }
 
   async function submitReceipt(event: React.FormEvent<HTMLFormElement>) {
@@ -484,6 +687,27 @@ function PrivyHome() {
     await action("dispute", () => write(context.address, context.provider, "open_dispute", [selectedJob.job_id, disputeForm.type, disputeForm.complaint]));
   }
 
+  async function revealResult(job: Job) {
+    if (!authenticated) {
+      setModal("none");
+      login();
+      return;
+    }
+    setResultBusy(job.job_id);
+    setError("");
+    try {
+      const token = await getAccessToken();
+      if (!token) throw new Error("Privy did not return an access token.");
+      const context = await walletContext();
+      const result = await fetchJobResult(job, token, context.provider, context.address);
+      setResults((current) => ({ ...current, [job.job_id]: result }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The result could not be retrieved.");
+    } finally {
+      setResultBusy("");
+    }
+  }
+
   async function runJobAction(actionName: string, job: Job) {
     if (["receipt", "evidence", "dispute"].includes(actionName)) {
       setSelectedJob(job);
@@ -504,12 +728,13 @@ function PrivyHome() {
         </button>
         <div className="nav-center">
           <button className={view === "console" ? "nav-link selected" : "nav-link"} onClick={() => setView("console")}><Layers3 size={15} /> Console</button>
+          <button className={view === "dashboard" ? "nav-link selected" : "nav-link"} onClick={() => setView("dashboard")}><WalletCards size={15} /> My escrows</button>
           <button className={view === "guide" ? "nav-link selected" : "nav-link"} onClick={() => setView("guide")}><BookOpen size={15} /> Field guide</button>
         </div>
         <div className="nav-right">
           <span className="network-chip"><span className="pulse-dot" /> Studio Next <span className="mono">{CHAIN_ID}</span></span>
           {authenticated && address ? (
-            <button className="wallet-chip" onClick={() => void logout()} title="Sign out of Privy">
+            <button className="wallet-chip" onClick={() => setModal("logout")} title="Sign out of Privy">
               <WalletCards size={15} /> {shortAddress(address)} <LogOut size={13} />
             </button>
           ) : (
@@ -520,7 +745,20 @@ function PrivyHome() {
         </div>
       </header>
 
-      {view === "guide" ? <Guide /> : (
+      {view === "guide" ? <Guide /> : view === "dashboard" ? (
+        <BuyerDashboard
+          authenticated={authenticated}
+          address={address}
+          jobs={state.jobs}
+          capabilities={state.capabilities}
+          evidence={state.evidence}
+          results={results}
+          resultBusy={resultBusy}
+          onConnect={() => void connect()}
+          onResult={(job) => void revealResult(job)}
+          onAction={(name, job) => void runJobAction(name, job)}
+        />
+      ) : (
         <section id="console" className="console-view">
           <div className="console-hero">
             <div className="hero-copy">
@@ -564,7 +802,7 @@ function PrivyHome() {
             </div>
             <div className="capability-layout">
               <div className="capability-list">
-                {state.capabilities.length ? state.capabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onBuy={(capability) => { setSelectedCapability(capability); setModal("job"); }} />) : (
+                {state.capabilities.length ? state.capabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onBuy={(capability) => { setSelectedCapability(capability); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
                   <div className="empty-state"><Orbit size={23} /><h3>The rail is waiting for its first capability.</h3><p>Register an agent service below, then make its promise specific enough to verify.</p></div>
                 )}
               </div>
@@ -617,10 +855,11 @@ function PrivyHome() {
       )}
 
       {modal === "register" && <ModalShell eyebrow="Provider entry" title="Register a capability" onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void register(event)}><div className="form-grid"><Field label="Capability name" name="name" value={registerForm.name} onChange={(value) => setRegisterForm({ ...registerForm, name: value })} /><Field label="Public endpoint" name="endpoint" value={registerForm.endpoint} onChange={(value) => setRegisterForm({ ...registerForm, endpoint: value })} /><Field label="Deadline (seconds)" name="deadline" type="number" value={registerForm.deadline} onChange={(value) => setRegisterForm({ ...registerForm, deadline: value })} /><Field label="Price (GEN)" name="price" value={registerForm.price} onChange={(value) => setRegisterForm({ ...registerForm, price: value })} /><Field label="Collateral (GEN)" name="collateral" value={registerForm.collateral} onChange={(value) => setRegisterForm({ ...registerForm, collateral: value })} /><Field label="Timeout refund (%)" name="timeout" type="number" value={registerForm.timeout} onChange={(value) => setRegisterForm({ ...registerForm, timeout: value })} /><Field label="Malformed refund (%)" name="malformed" type="number" value={registerForm.malformed} onChange={(value) => setRegisterForm({ ...registerForm, malformed: value })} /></div><label className="field"><span>Terms</span><textarea value={registerForm.terms} onChange={(event) => setRegisterForm({ ...registerForm, terms: event.target.value })} /></label><label className="field"><span>Required output schema</span><textarea value={registerForm.schema} onChange={(event) => setRegisterForm({ ...registerForm, schema: event.target.value })} /></label><div className="modal-actions"><span className="modal-note">Collateral is held by Recourse until the request resolves.</span><button className="button button-acid" disabled={busy === "register"} type="submit">{busy === "register" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Register</button></div></form></ModalShell>}
-      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Provider receives it only after evidence and the challenge window.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><div className="hash-note"><span className="mono">request identity</span><strong>generated automatically</strong><p>Recourse hashes this capability and request label before funding. The same identifier travels through the provider receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs this Studio Next transaction.</span><button className="button button-acid" disabled={busy === "job"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund escrow</button></div></form></ModalShell>}
+      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>After funding, the live capability runs automatically and the result appears in My escrows.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><JobRequestFields capability={selectedCapability} form={jobForm} onChange={setJobForm} /><div className="hash-note"><span className="mono">request identity</span><strong>generated at funding time</strong><p>The request hash commits to this capability, label, exact input, and a one-time nonce. It is shown in My escrows and carried through the signed receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs the escrow. The adapter runs only this listed capability.</span><button className="button button-acid" disabled={busy === "job"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund and run</button></div></form></ModalShell>}
       {modal === "receipt" && selectedJob && <ModalShell eyebrow="Provider execution" title={`Submit receipt for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void submitReceipt(event)}><Field label="Output hash" name="outputHash" value={receiptForm.outputHash} onChange={(value) => setReceiptForm({ ...receiptForm, outputHash: value })} placeholder="sha256:..." /><div className="form-grid"><label className="field"><span>Response status</span><select value={receiptForm.status} onChange={(event) => setReceiptForm({ ...receiptForm, status: event.target.value })}><option value="success">Success</option><option value="timeout">Timeout</option><option value="malformed">Malformed</option></select></label><Field label="HTTP status" name="code" type="number" value={receiptForm.code} onChange={(value) => setReceiptForm({ ...receiptForm, code: value })} /><Field label="Latency (ms)" name="latency" type="number" value={receiptForm.latency} onChange={(value) => setReceiptForm({ ...receiptForm, latency: value })} /></div><label className="check-field"><input type="checkbox" checked={receiptForm.schemaValid} onChange={(event) => setReceiptForm({ ...receiptForm, schemaValid: event.target.checked })} /> Output matched the required schema</label><div className="modal-actions"><span className="modal-note">Your embedded wallet signs the canonical receipt.</span><button className="button button-acid" disabled={busy === "receipt"} type="submit">{busy === "receipt" ? <LoaderCircle className="spin" size={15} /> : <FileCheck2 size={15} />} Sign and commit</button></div></form></ModalShell>}
       {modal === "evidence" && selectedJob && <ModalShell eyebrow="Monitor evidence" title={`Publish evidence for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void publishEvidence(event)}><Field label="Public evidence URL" name="url" value={evidenceForm.url} onChange={(value) => setEvidenceForm({ url: value })} placeholder="https://adapter.example.com/evidence/..." /><div className="evidence-callout"><ScanLine size={18} /><span>Validators fetch this JSON themselves. It must match the provider’s signed receipt exactly.</span></div><div className="modal-actions"><span className="modal-note">Monitor access is enforced by the contract.</span><button className="button button-acid" disabled={busy === "evidence"} type="submit">{busy === "evidence" ? <LoaderCircle className="spin" size={15} /> : <ScanLine size={15} />} Publish evidence</button></div></form></ModalShell>}
       {modal === "dispute" && selectedJob && <ModalShell eyebrow="Onchain justice" title={`Open recourse for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void openDispute(event)}><label className="field"><span>Dispute type</span><select value={disputeForm.type} onChange={(event) => setDisputeForm({ ...disputeForm, type: event.target.value })}><option value="quality">Quality</option><option value="terms">Terms</option></select></label><label className="field"><span>Complaint</span><textarea value={disputeForm.complaint} onChange={(event) => setDisputeForm({ ...disputeForm, complaint: event.target.value })} required /></label><div className="modal-actions"><span className="modal-note">Validators receive the signed evidence and complaint.</span><button className="button button-acid" disabled={busy === "dispute"} type="submit">{busy === "dispute" ? <LoaderCircle className="spin" size={15} /> : <Gavel size={15} />} Open dispute</button></div></form></ModalShell>}
+      {modal === "logout" && <ModalShell eyebrow="Session control" title="Log out of Recourse?" onClose={() => setModal("none")}><div className="logout-confirm"><p>Your Studio Next embedded wallet stays available only while this session is connected. Any funded escrows remain onchain and visible when you sign in again.</p><div className="modal-actions"><button className="button button-ghost" onClick={() => setModal("none")}><Check size={15} /> Stay connected</button><button className="button button-dark" onClick={() => { setModal("none"); void logout(); }}><LogOut size={15} /> Log out</button></div></div></ModalShell>}
     </main>
   );
 }
