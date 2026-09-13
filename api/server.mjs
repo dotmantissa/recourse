@@ -70,6 +70,7 @@ const AGENT_DEFINITIONS = {
 const agentAccount = /^0x[0-9a-fA-F]{64}$/.test(AGENT_SIGNING_KEY)
   ? privateKeyToAccount(AGENT_SIGNING_KEY)
   : null;
+let githubWriteQueue = Promise.resolve();
 
 function corsHeaders(request, isPublic = false) {
   const origin = request.headers.origin || "";
@@ -417,23 +418,27 @@ async function ensureGithubEvidenceBranch() {
 
 async function writeGithubPacket(jobId, packet) {
   if (!GITHUB_TOKEN) return;
-  await ensureGithubEvidenceBranch();
-  const path = `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json`;
-  const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
-  let sha;
-  if (existing.ok) sha = (await existing.json()).sha;
-  else if (existing.status !== 404) throw new Error(`GitHub evidence lookup returned ${existing.status}`);
-  const response = await githubRequest(path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message: `Publish Recourse evidence ${jobId}`,
-      content: Buffer.from(`${JSON.stringify(packet, null, 2)}\n`).toString("base64"),
-      branch: GITHUB_EVIDENCE_BRANCH,
-      ...(sha ? { sha } : {}),
-    }),
+  const operation = githubWriteQueue.then(async () => {
+    await ensureGithubEvidenceBranch();
+    const path = `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json`;
+    const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
+    let sha;
+    if (existing.ok) sha = (await existing.json()).sha;
+    else if (existing.status !== 404) throw new Error(`GitHub evidence lookup returned ${existing.status}`);
+    const response = await githubRequest(path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `Publish Recourse evidence ${jobId}`,
+        content: Buffer.from(`${JSON.stringify(packet, null, 2)}\n`).toString("base64"),
+        branch: GITHUB_EVIDENCE_BRANCH,
+        ...(sha ? { sha } : {}),
+      }),
+    });
+    if (!response.ok) throw new Error(`GitHub evidence write returned ${response.status}`);
   });
-  if (!response.ok) throw new Error(`GitHub evidence write returned ${response.status}`);
+  githubWriteQueue = operation.then(() => undefined, () => undefined);
+  await operation;
 }
 
 async function writePacket(jobId, packet) {
