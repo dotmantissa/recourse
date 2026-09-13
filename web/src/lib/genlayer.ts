@@ -52,6 +52,26 @@ const readInFlight = new Map<string, Promise<unknown>>();
 let readQueue = Promise.resolve();
 const readTimestamps: number[] = [];
 
+function isTransientRpcError(message: string) {
+  return /rate limit|too many requests|429|unexpected token ['"<]/i.test(message)
+    || /not valid json|<!doctype html>|fetch failed|502|503|504/i.test(message);
+}
+
+function rpcErrorMessage(cause: unknown) {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/unexpected token ['"<]/i.test(message) || /<!doctype html>|not valid json/i.test(message)) {
+    return "Studio Next returned a temporary non-JSON response while confirming the transaction. Recourse will retry automatically.";
+  }
+  if (/rate limit|too many requests|429/i.test(message)) {
+    return "Studio Next rate-limited the request. Recourse will retry automatically.";
+  }
+  return message;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
 function getReader() {
   reader ??= createClient({ chain: studioDevnet, endpoint: RPC_URL });
   return reader;
@@ -121,13 +141,11 @@ async function read(functionName: string, args: CalldataEncodable[] = []) {
         return value;
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
-        if (!/rate limit|too many requests|429/i.test(message) || attempt >= 2) {
+        if (!isTransientRpcError(message) || attempt >= 3) {
           if (cached) return cached.value;
           throw cause;
         }
-        await new Promise((resolve) =>
-          globalThis.setTimeout(resolve, 4000 * (attempt + 1)),
-        );
+        await sleep(2500 * (attempt + 1));
         attempt += 1;
       }
     }
@@ -246,6 +264,12 @@ export async function loadState(): Promise<AppState> {
   };
 }
 
+export async function readJob(jobId: string): Promise<Job | null> {
+  const value = await read("get_job", [jobId]);
+  if (!value) return null;
+  return parse<Job>(value);
+}
+
 export async function readReputation(address: string): Promise<Reputation | null> {
   if (!CONTRACT_ADDRESS || !address) return null;
   const key = `reputation:${address.toLowerCase()}`;
@@ -324,13 +348,28 @@ export async function write(
       feeValue: fees.feeValue,
     },
   });
-  const receipt = await client.waitForTransactionReceipt({
-    hash,
-    waitUntil: "finalized",
-    interval: 3000,
-    retries: 240,
-    fullTransaction: true,
-  });
+  let receipt;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      receipt = await client.waitForTransactionReceipt({
+        hash,
+        waitUntil: "finalized",
+        interval: 3000,
+        retries: 240,
+        fullTransaction: true,
+      });
+      break;
+    } catch (cause) {
+      lastError = cause;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!isTransientRpcError(message) || attempt === 3) {
+        throw new Error(rpcErrorMessage(cause));
+      }
+      await sleep(1500 * (attempt + 1));
+    }
+  }
+  if (!receipt) throw new Error(rpcErrorMessage(lastError));
   const result = String(receipt.txExecutionResultName ?? "");
   if (result && result !== "FINISHED_WITH_RETURN") {
     throw new Error(`Transaction finalized with execution result ${result}.`);

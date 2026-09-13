@@ -8,6 +8,7 @@ import {
   BadgeCheck,
   BookOpen,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -24,6 +25,7 @@ import {
   Plus,
   RefreshCw,
   ScanLine,
+  Search,
   Send,
   ShieldCheck,
   Sparkles,
@@ -43,9 +45,11 @@ import {
 } from "@/lib/config";
 import {
   loadState,
+  clearReadCache,
   executeFundedCapability,
   fetchJobResult,
   hashRequest,
+  readJob,
   readReputation,
   signReceipt,
   write,
@@ -270,17 +274,20 @@ function JobLedgerRow({
   capability,
   address,
   monitorAddress,
+  now,
   onAction,
 }: {
   job: Job;
   capability?: Capability;
   address: string;
   monitorAddress: string;
+  now: number;
   onAction: (action: string, job: Job) => void;
 }) {
   const isBuyer = job.buyer.toLowerCase() === address.toLowerCase();
   const isProvider = job.provider.toLowerCase() === address.toLowerCase();
   const isMonitor = Boolean(monitorAddress) && monitorAddress.toLowerCase() === address.toLowerCase();
+  const settlementReady = Number(job.deadline_at) * 1000 <= now;
   return (
     <article className="ledger-row">
       <div className="ledger-number">0{job.job_id}</div>
@@ -295,7 +302,7 @@ function JobLedgerRow({
         {isMonitor && job.status === "receipt_submitted" && <button className="icon-button" title="Publish evidence packet" aria-label="Publish evidence packet" onClick={() => onAction("evidence", job)}><ScanLine size={16} /></button>}
         {isBuyer && job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
         {isBuyer && job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
-        {job.status === "receipt_submitted" && <button className="button button-dark small" onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> Settle</button>}
+        {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!settlementReady} title={settlementReady ? "Settle this escrow" : `Available after ${formatDate(job.deadline_at)}`} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {settlementReady ? "Settle" : "Settle after deadline"}</button>}
         {job.status === "settled" && <span className={`outcome ${statusTone(job.outcome)}`}>{statusLabel(job.outcome)} · {bps(job.refund_bps)} back</span>}
       </div>
     </article>
@@ -373,6 +380,21 @@ function Guide() {
 // publish receipt + evidence
 // settle or open recourse`}</code></pre>
       </div>
+      <div className="agent-runbook">
+        <div>
+          <span className="eyebrow">How agents use Recourse</span>
+          <h2>Buy work in six messages.</h2>
+          <p>Agents can use the console for a human-guided run, or call the same contract and adapter surfaces from their own runtime.</p>
+        </div>
+        <ol>
+          <li><strong>Discover.</strong> Read <code>get_capabilities()</code> on the Studio Next contract and choose an active capability whose price, deadline, schema, and refund rules fit the task.</li>
+          <li><strong>Commit.</strong> Create the exact structured request and a fresh nonce. Recourse hashes the capability ID, trimmed label, request, nonce, and <code>recourse-request-v2</code> version. The hash is generated for you in the funding form.</li>
+          <li><strong>Fund.</strong> Call <code>create_job(capability_id, request_hash, request_label)</code> with the listed GEN price as native value. The funded job and request hash appear in <strong>My escrows</strong>.</li>
+          <li><strong>Execute.</strong> POST the request to the capability endpoint with the funded job ID, request hash, label, capability ID, and nonce headers. The adapter rejects mismatched commitments and cannot switch to another capability.</li>
+          <li><strong>Collect.</strong> The provider returns a signed receipt and public evidence. The buyer opens <strong>My escrows</strong>, signs a one-time access message, and reveals the authenticated result there.</li>
+          <li><strong>Resolve.</strong> Settle after the response deadline when the evidence meets the terms. If the provider times out, claim the configured timeout refund. If quality or terms are disputed, open recourse and GenLayer resolves the semantic claim.</li>
+        </ol>
+      </div>
       <div className="guide-footer-callout">
         <div className="stamp"><KeyRound size={18} /> no blind payment</div>
         <p>Recourse is not a marketplace and it is not an uptime dashboard. It is the request-level contract that gives agents a credible reason to transact.</p>
@@ -391,6 +413,7 @@ function BuyerDashboard({
   results,
   resultBusy,
   executeBusy,
+  now,
   onConnect,
   onResult,
   onExecute,
@@ -404,12 +427,27 @@ function BuyerDashboard({
   results: Record<string, JobResult | null>;
   resultBusy: string;
   executeBusy: string;
+  now: number;
   onConnect: () => void;
   onResult: (job: Job) => void;
   onExecute: (job: Job) => void;
   onAction: (action: string, job: Job) => void;
 }) {
-  const buyerJobs = jobs.filter((job) => job.buyer.toLowerCase() === address.toLowerCase()).sort((a, b) => Number(b.job_id) - Number(a.job_id));
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | Job["status"]>("all");
+  const [page, setPage] = useState(0);
+  const buyerJobs = useMemo(() => jobs
+    .filter((job) => job.buyer.toLowerCase() === address.toLowerCase())
+    .filter((job) => {
+      if (statusFilter !== "all" && job.status !== statusFilter) return false;
+      const capability = capabilities.find((item) => item.capability_id === job.capability_id);
+      const haystack = `${job.job_id} ${job.request_hash} ${job.request_label} ${capability?.name ?? ""}`.toLowerCase();
+      return haystack.includes(query.trim().toLowerCase());
+    })
+    .sort((a, b) => Number(b.job_id) - Number(a.job_id)), [address, capabilities, jobs, query, statusFilter]);
+  const pageCount = Math.max(1, Math.ceil(buyerJobs.length / 2));
+  const safePage = Math.min(page, pageCount - 1);
+  const visibleBuyerJobs = buyerJobs.slice(safePage * 2, safePage * 2 + 2);
   if (!authenticated || !address) {
     return (
       <section className="dashboard-view">
@@ -432,8 +470,14 @@ function BuyerDashboard({
         <p>Results arrive here after the funded capability runs. The request hash is your portable receipt identity; the evidence link is what GenLayer validators inspect.</p>
       </div>
       <div className="dashboard-address"><WalletCards size={15} /><span className="mono">{address}</span><span>Studio Next / {CHAIN_ID}</span></div>
+      <div className="dashboard-filters">
+        <label className="search-field"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your request history" aria-label="Search your request history" /></label>
+        <div className="status-filters">
+          {(["all", "funded", "receipt_submitted", "disputed", "settled"] as const).map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{status === "all" ? "All" : statusLabel(status)}</button>)}
+        </div>
+      </div>
       <div className="dashboard-list">
-        {buyerJobs.length ? buyerJobs.map((job) => {
+        {visibleBuyerJobs.length ? visibleBuyerJobs.map((job) => {
           const capability = capabilities.find((item) => item.capability_id === job.capability_id);
           const evidenceRecord = evidence.find((item) => item.evidence_id === job.evidence_id);
           const result = results[job.job_id];
@@ -461,7 +505,7 @@ function BuyerDashboard({
                   {job.status === "funded" && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
                   {job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
                   {job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
-                  {job.status === "receipt_submitted" && <button className="button button-dark small" onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> Settle</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={Number(job.deadline_at) * 1000 > now} title={Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Settle this escrow"} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {Number(job.deadline_at) * 1000 > now ? "Settle after deadline" : "Settle"}</button>}
                 </div>
               </div>
               {result && (
@@ -481,6 +525,7 @@ function BuyerDashboard({
           </div>
         )}
       </div>
+      {buyerJobs.length > 2 && <div className="pagination-bar"><span className="mono">showing {safePage * 2 + 1}-{Math.min(safePage * 2 + 2, buyerJobs.length)} of {buyerJobs.length}</span><div><button className="icon-button" disabled={safePage === 0} onClick={() => setPage((current) => Math.max(0, current - 1))} title="Previous escrows" aria-label="Previous escrows"><ChevronLeft size={15} /></button><button className="icon-button" disabled={safePage >= pageCount - 1} onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))} title="Next escrows" aria-label="Next escrows"><ChevronRight size={15} /></button></div></div>}
     </section>
   );
 }
@@ -529,6 +574,9 @@ function PrivyHome() {
   const [results, setResults] = useState<Record<string, JobResult | null>>({});
   const [resultBusy, setResultBusy] = useState("");
   const [executeBusy, setExecuteBusy] = useState("");
+  const [now, setNow] = useState(() => Date.now());
+  const [capabilityQuery, setCapabilityQuery] = useState("");
+  const [capabilityPage, setCapabilityPage] = useState(0);
   const [registerForm, setRegisterForm] = useState({
     name: "Verified source research",
     endpoint: "https://api.example.com/research",
@@ -586,6 +634,22 @@ function PrivyHome() {
     };
   }, [refresh]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const filteredCapabilities = useMemo(() => {
+    const normalizedQuery = capabilityQuery.trim().toLowerCase();
+    return state.capabilities.filter((capability) => {
+      if (!normalizedQuery) return true;
+      return `${capability.name} ${capability.terms} ${capability.endpoint} ${capability.output_schema}`.toLowerCase().includes(normalizedQuery);
+    });
+  }, [capabilityQuery, state.capabilities]);
+  const capabilityPageCount = Math.max(1, Math.ceil(filteredCapabilities.length / 2));
+  const safeCapabilityPage = Math.min(capabilityPage, capabilityPageCount - 1);
+  const visibleCapabilities = filteredCapabilities.slice(safeCapabilityPage * 2, safeCapabilityPage * 2 + 2);
+
   const visibleJobs = useMemo(() => {
     const mine = state.jobs.filter((item) => !address || item.buyer.toLowerCase() === address.toLowerCase() || item.provider.toLowerCase() === address.toLowerCase());
     if (lens === "buyer") return mine.filter((item) => item.buyer.toLowerCase() === address.toLowerCase());
@@ -603,7 +667,7 @@ function PrivyHome() {
     return { address: embeddedWallet.address, provider };
   }
 
-  async function action(label: string, fn: () => Promise<string>) {
+  async function action(label: string, fn: () => Promise<string>): Promise<string | null> {
     setBusy(label);
     setError("");
     setNotice("");
@@ -612,11 +676,23 @@ function PrivyHome() {
       setNotice(`Finalized ${hash.slice(0, 12)}...`);
       setModal("none");
       await refresh();
+      return hash;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The transaction failed.");
+      return null;
     } finally {
       setBusy("");
     }
+  }
+
+  async function waitForJobStatus(jobId: string, expectedStatus: Job["status"]) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      clearReadCache();
+      const latest = await readJob(jobId);
+      if (latest?.status === expectedStatus) return latest;
+      await new Promise((resolve) => window.setTimeout(resolve, 1800));
+    }
+    return null;
   }
 
   async function connect() {
@@ -662,13 +738,19 @@ function PrivyHome() {
       const nonce = crypto.randomUUID();
       const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label, request, nonce);
       await write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei));
-      const job = await findJob(requestHash, context.address);
-      saveRequestContext(job.job_id, request, nonce);
-      const result = await executeFundedCapability(selectedCapability, job, request, nonce);
-      setResults((current) => ({ ...current, [job.job_id]: result }));
-      setNotice(`Job ${job.job_id} executed. Your result is ready in My escrows.`);
       setView("dashboard");
       setModal("none");
+      setNotice("Escrow funded. Locating the onchain job and starting the capability...");
+      const job = await findJob(requestHash, context.address);
+      saveRequestContext(job.job_id, request, nonce);
+      try {
+        const result = await executeFundedCapability(selectedCapability, job, request, nonce);
+        setResults((current) => ({ ...current, [job.job_id]: result }));
+        setNotice(`Job ${job.job_id} executed. Your result is ready in My escrows.`);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "The capability was funded, but execution is still pending.");
+        setNotice(`Job ${job.job_id} is funded. Open My escrows to retry execution or claim recourse after the deadline.`);
+      }
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The funded request could not be completed.");
@@ -762,7 +844,22 @@ function PrivyHome() {
     }
     const context = await walletContext();
     if (actionName === "timeout") await action(`timeout-${job.job_id}`, () => write(context.address, context.provider, "claim_timeout", [job.job_id], 0n, [job.buyer]));
-    if (actionName === "settle") await action(`settle-${job.job_id}`, () => write(context.address, context.provider, "settle_job", [job.job_id], 0n, [job.buyer, job.provider]));
+    if (actionName === "settle") {
+      if (Number(job.deadline_at) * 1000 > Date.now()) {
+        setError(`Settlement opens after the response deadline: ${formatDate(job.deadline_at)}.`);
+        return;
+      }
+      const hash = await action(`settle-${job.job_id}`, () => write(context.address, context.provider, "settle_job", [job.job_id], 0n, [job.buyer, job.provider]));
+      if (!hash) return;
+      const latest = await waitForJobStatus(job.job_id, "settled");
+      if (latest) {
+        setState((current) => ({ ...current, jobs: current.jobs.map((item) => item.job_id === latest.job_id ? latest : item) }));
+        setNotice(`Job ${job.job_id} is settled. The escrow outcome is now recorded onchain.`);
+      } else {
+        setNotice(`Settlement transaction finalized for Job ${job.job_id}. Studio Next is still indexing the updated escrow state.`);
+      }
+      await refresh();
+    }
   }
 
   return (
@@ -805,6 +902,7 @@ function PrivyHome() {
           onResult={(job) => void revealResult(job)}
           onExecute={(job) => void executeExistingJob(job)}
           onAction={(name, job) => void runJobAction(name, job)}
+          now={now}
         />
       ) : (
         <section id="console" className="console-view">
@@ -848,9 +946,13 @@ function PrivyHome() {
               <div><h2>Services with a<br /><em>defined way back.</em></h2></div>
               <div className="section-heading-copy"><p>Agents do not need another directory. They need a credible boundary around each request.</p><button className="text-link" onClick={() => setView("guide")}>How capabilities work <ChevronRight size={14} /></button></div>
             </div>
+            <div className="capability-toolbar">
+              <label className="search-field"><Search size={15} /><input value={capabilityQuery} onChange={(event) => setCapabilityQuery(event.target.value)} placeholder="Search capabilities, terms, or schema" aria-label="Search capabilities" /></label>
+              {filteredCapabilities.length > 2 && <div className="pagination-bar capability-pagination"><span className="mono">showing {safeCapabilityPage * 2 + 1}-{Math.min(safeCapabilityPage * 2 + 2, filteredCapabilities.length)} of {filteredCapabilities.length}</span><div><button className="icon-button" disabled={safeCapabilityPage === 0} onClick={() => setCapabilityPage((current) => Math.max(0, current - 1))} title="Previous capabilities" aria-label="Previous capabilities"><ChevronLeft size={15} /></button><button className="icon-button" disabled={safeCapabilityPage >= capabilityPageCount - 1} onClick={() => setCapabilityPage((current) => Math.min(capabilityPageCount - 1, current + 1))} title="View more capabilities" aria-label="View more capabilities"><ChevronRight size={15} /></button></div></div>}
+            </div>
             <div className="capability-layout">
-              <div className="capability-list">
-                {state.capabilities.length ? state.capabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onBuy={(capability) => { setSelectedCapability(capability); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
+                <div className="capability-list">
+                {visibleCapabilities.length ? visibleCapabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onBuy={(capability) => { setSelectedCapability(capability); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
                   <div className="empty-state"><Orbit size={23} /><h3>The rail is waiting for its first capability.</h3><p>Register an agent service below, then make its promise specific enough to verify.</p></div>
                 )}
               </div>
@@ -877,7 +979,7 @@ function PrivyHome() {
               </div>
             </div>
             <div className="ledger-list">
-              {visibleJobs.length ? [...visibleJobs].reverse().map((job) => <JobLedgerRow key={job.job_id} job={job} capability={state.capabilities.find((item) => item.capability_id === job.capability_id)} address={address} monitorAddress={MONITOR_ADDRESS} onAction={(name, item) => void runJobAction(name, item)} />) : (
+              {visibleJobs.length ? [...visibleJobs].reverse().map((job) => <JobLedgerRow key={job.job_id} job={job} capability={state.capabilities.find((item) => item.capability_id === job.capability_id)} address={address} monitorAddress={MONITOR_ADDRESS} now={now} onAction={(name, item) => void runJobAction(name, item)} />) : (
                 <div className="empty-state ledger-empty"><LockKeyhole size={23} /><h3>No requests in this lens.</h3><p>Fund a capability and the signed execution lifecycle will appear here.</p></div>
               )}
             </div>
