@@ -84,6 +84,23 @@ function statusLabel(status: string) {
   return status.replaceAll("_", " ");
 }
 
+function requestStorageKey(jobId: string) {
+  return `recourse:request:${jobId}`;
+}
+
+function saveRequestContext(jobId: string, request: CapabilityRequest | null, nonce: string) {
+  window.localStorage.setItem(requestStorageKey(jobId), JSON.stringify({ request, nonce }));
+}
+
+function loadRequestContext(jobId: string): { request: CapabilityRequest | null; nonce: string } | null {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(requestStorageKey(jobId)) || "null");
+    return value && typeof value.nonce === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function capabilitySlug(capability: Capability) {
   return capability.endpoint.split("/agents/")[1]?.split("/")[0] ?? "";
 }
@@ -373,8 +390,10 @@ function BuyerDashboard({
   evidence,
   results,
   resultBusy,
+  executeBusy,
   onConnect,
   onResult,
+  onExecute,
   onAction,
 }: {
   authenticated: boolean;
@@ -384,8 +403,10 @@ function BuyerDashboard({
   evidence: AppState["evidence"];
   results: Record<string, JobResult | null>;
   resultBusy: string;
+  executeBusy: string;
   onConnect: () => void;
   onResult: (job: Job) => void;
+  onExecute: (job: Job) => void;
   onAction: (action: string, job: Job) => void;
 }) {
   const buyerJobs = jobs.filter((job) => job.buyer.toLowerCase() === address.toLowerCase()).sort((a, b) => Number(b.job_id) - Number(a.job_id));
@@ -437,6 +458,7 @@ function BuyerDashboard({
                   <button className="text-link" onClick={() => onResult(job)} disabled={resultBusy === job.job_id}>{resultBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <FileCheck2 size={14} />} {result ? "Refresh result" : "Reveal result"}</button>
                 </div>
                 <div className="dashboard-actions">
+                  {job.status === "funded" && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
                   {job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
                   {job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
                   {job.status === "receipt_submitted" && <button className="button button-dark small" onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> Settle</button>}
@@ -506,6 +528,7 @@ function PrivyHome() {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [results, setResults] = useState<Record<string, JobResult | null>>({});
   const [resultBusy, setResultBusy] = useState("");
+  const [executeBusy, setExecuteBusy] = useState("");
   const [registerForm, setRegisterForm] = useState({
     name: "Verified source research",
     endpoint: "https://api.example.com/research",
@@ -640,6 +663,7 @@ function PrivyHome() {
       const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label, request, nonce);
       await write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei));
       const job = await findJob(requestHash, context.address);
+      saveRequestContext(job.job_id, request, nonce);
       const result = await executeFundedCapability(selectedCapability, job, request, nonce);
       setResults((current) => ({ ...current, [job.job_id]: result }));
       setNotice(`Job ${job.job_id} executed. Your result is ready in My escrows.`);
@@ -708,6 +732,28 @@ function PrivyHome() {
     }
   }
 
+  async function executeExistingJob(job: Job) {
+    const capability = state.capabilities.find((item) => item.capability_id === job.capability_id);
+    const context = loadRequestContext(job.job_id);
+    if (!capability || !context) {
+      setError("This funded request has no local input commitment available. It can still be claimed after its deadline.");
+      return;
+    }
+    setExecuteBusy(job.job_id);
+    setError("");
+    setNotice("");
+    try {
+      const result = await executeFundedCapability(capability, job, context.request, context.nonce);
+      setResults((current) => ({ ...current, [job.job_id]: result }));
+      setNotice(`Job ${job.job_id} executed. The result is ready below.`);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The funded request could not be executed.");
+    } finally {
+      setExecuteBusy("");
+    }
+  }
+
   async function runJobAction(actionName: string, job: Job) {
     if (["receipt", "evidence", "dispute"].includes(actionName)) {
       setSelectedJob(job);
@@ -754,8 +800,10 @@ function PrivyHome() {
           evidence={state.evidence}
           results={results}
           resultBusy={resultBusy}
+          executeBusy={executeBusy}
           onConnect={() => void connect()}
           onResult={(job) => void revealResult(job)}
+          onExecute={(job) => void executeExistingJob(job)}
           onAction={(name, job) => void runJobAction(name, job)}
         />
       ) : (

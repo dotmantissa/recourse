@@ -723,7 +723,7 @@ async function fundedJob(slug, jobId, requestHash) {
   return { job, capability };
 }
 
-async function completeAgentJob(slug, payload, request, response) {
+async function completeAgentJob(slug, payload, request) {
   const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
   const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
   const requestLabel = assertString(request.headers["x-recourse-request-label"], "x-recourse-request-label", 1, 240);
@@ -907,7 +907,7 @@ const server = createServer(async (request, response) => {
     }
     try {
       const payload = JSON.parse(await readBody(request));
-      const result = await completeAgentJob(slug, payload, request, response);
+      const result = await completeAgentJob(slug, payload, request);
       return json(response, 200, {
         agent: slug,
         network: "studio-next",
