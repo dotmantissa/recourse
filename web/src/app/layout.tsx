@@ -5,6 +5,10 @@ import Providers from "./providers";
 export const metadata: Metadata = {
   title: "Recourse | Agent commerce with a way back",
   description: "Request-level escrow and automatic chargebacks for agent commerce.",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
