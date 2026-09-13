@@ -1,0 +1,13 @@
+{
+  "job_id": "verify-citation-2",
+  "request_hash": "sha256:verify-citation-2",
+  "output_hash": "sha256:692336de8dc9c6d605aef6c5501abc3984edc3d3a8f6946f4018ed09049386be",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 190,
+  "schema_valid": true,
+  "completed_at": "2026-09-13T01:48:39.741Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0x2faa54c5cd442b1a2e5bc9ee992fe859dea6babc06da8c260dc3e76ea970d70540bee6e97f07460c9261d1c908778f15feb8e892c6934be78119e3bc637660f31c",
+  "receipt_hash": "2b8c351848d2dc5846785f6e06a05cdb80b0c33840877ce10b3ddd094cfb9a97"
+}
