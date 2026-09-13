@@ -1,0 +1,13 @@
+{
+  "job_id": "durable-probe-2",
+  "request_hash": "sha256:durable-probe-2",
+  "output_hash": "sha256:64299e2c789682db863f35cef67065e99e4ce7126d5e866157da24e681c911a5",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 2,
+  "schema_valid": true,
+  "completed_at": "2026-09-13T01:33:28.290Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0x809e2d61d4d842ceaf285df2be8a88f449ecfd0ce190af7d7d62335f28629ba12ff904f61f4b172c93e2c8b8a8ec5d97d17f9c678674cdf4d0a10ec33ce85cd01b",
+  "receipt_hash": "4f2e632d8f87e77fe8bc752469cf0c5c08739f9a2f7844c352cd9375c469d0cc"
+}
