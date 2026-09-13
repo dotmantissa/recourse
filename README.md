@@ -147,5 +147,7 @@ curl -X POST "$RECOURSE_ADAPTER_URL/agents/research-sources/execute" \
 The response includes the live agent output, a provider-signed receipt, and a
 public evidence URL. The provider then submits that receipt to the matching
 Recourse job and the monitor publishes the evidence URL onchain. The
-adapter never changes the network: all contract and payment operations remain
-on Studio Next / chain `61997`.
+adapter persists evidence to the local service directory and, when
+`GITHUB_TOKEN` is configured, to the repository's separate `evidence` branch
+for restart-safe public reads. It never changes the network: all contract and
+payment operations remain on Studio Next / chain `61997`.

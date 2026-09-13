@@ -2,7 +2,7 @@ services:
   - type: web
     name: recourse-evidence
     runtime: node
-    plan: starter
+    plan: free
     region: oregon
     branch: main
     rootDir: .
@@ -10,13 +10,9 @@ services:
     startCommand: node api/server.mjs
     healthCheckPath: /health
     autoDeploy: true
-    disk:
-      name: recourse-evidence-data
-      mountPath: /var/lib/recourse
-      sizeGB: 1
     envVars:
       - key: EVIDENCE_DIR
-        value: /var/lib/recourse/evidence
+        value: evidence
       - key: FRONTEND_ORIGIN
         value: https://recourse-gamma.vercel.app
       - key: RECOURSE_CONTRACT_ADDRESS
@@ -33,3 +29,9 @@ services:
         sync: false
       - key: PUBLIC_BASE_URL
         sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPOSITORY
+        value: dotmantissa/recourse
+      - key: GITHUB_EVIDENCE_BRANCH
+        value: evidence

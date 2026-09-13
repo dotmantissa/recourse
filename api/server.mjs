@@ -11,6 +11,9 @@ const MONITOR_SECRET = process.env.MONITOR_SECRET || "";
 const EVIDENCE_DIR = resolve(process.env.EVIDENCE_DIR || "evidence");
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "").replace(/\/+$/, "");
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY || "dotmantissa/recourse";
+const GITHUB_EVIDENCE_BRANCH = process.env.GITHUB_EVIDENCE_BRANCH || "evidence";
 const REQUEST_PRICE_WEI = process.env.REQUEST_PRICE_WEI || "2000000000000000000";
 const AGENT_SIGNING_KEY = process.env.AGENT_SIGNING_KEY || "";
 const CONTRACT_ADDRESS =
@@ -363,13 +366,79 @@ async function readPacket(jobId) {
   try {
     return JSON.parse(await readFile(packetPath(jobId), "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
+    if (error?.code !== "ENOENT") throw error;
   }
+  if (!GITHUB_TOKEN) return null;
+  try {
+    const response = await githubRequest(
+      `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
+    );
+    if (!response.ok) return null;
+    const body = await response.json();
+    return JSON.parse(Buffer.from(String(body.content || "").replace(/\n/g, ""), "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function githubRequest(path, options = {}) {
+  return fetch(`https://api.github.com${path}`, {
+    ...options,
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
+      ...(options.headers || {}),
+    },
+  });
+}
+
+async function ensureGithubEvidenceBranch() {
+  const current = await githubRequest(
+    `/repos/${GITHUB_REPOSITORY}/git/ref/heads/${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
+  );
+  if (current.ok) return;
+  if (current.status !== 404) throw new Error(`GitHub branch lookup returned ${current.status}`);
+  const main = await githubRequest(`/repos/${GITHUB_REPOSITORY}/git/ref/heads/main`);
+  if (!main.ok) throw new Error(`GitHub main branch lookup returned ${main.status}`);
+  const mainBody = await main.json();
+  const created = await githubRequest(`/repos/${GITHUB_REPOSITORY}/git/refs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ref: `refs/heads/${GITHUB_EVIDENCE_BRANCH}`,
+      sha: mainBody.object.sha,
+    }),
+  });
+  if (!created.ok && created.status !== 422) {
+    throw new Error(`GitHub evidence branch creation returned ${created.status}`);
+  }
+}
+
+async function writeGithubPacket(jobId, packet) {
+  if (!GITHUB_TOKEN) return;
+  await ensureGithubEvidenceBranch();
+  const path = `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json`;
+  const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
+  let sha;
+  if (existing.ok) sha = (await existing.json()).sha;
+  else if (existing.status !== 404) throw new Error(`GitHub evidence lookup returned ${existing.status}`);
+  const response = await githubRequest(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: `Publish Recourse evidence ${jobId}`,
+      content: Buffer.from(`${JSON.stringify(packet, null, 2)}\n`).toString("base64"),
+      branch: GITHUB_EVIDENCE_BRANCH,
+      ...(sha ? { sha } : {}),
+    }),
+  });
+  if (!response.ok) throw new Error(`GitHub evidence write returned ${response.status}`);
 }
 
 async function writePacket(jobId, packet) {
   await mkdir(EVIDENCE_DIR, { recursive: true });
+  await writeGithubPacket(jobId, packet);
   const target = packetPath(jobId);
   const temporary = `${target}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(packet, null, 2)}\n`, {
@@ -441,6 +510,7 @@ const server = createServer(async (request, response) => {
           network: "studio-next",
           chain_id: CHAIN_ID,
           storage: "ready",
+          durable_evidence: Boolean(GITHUB_TOKEN),
           privy_configured: Boolean(process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET),
         },
         publicCors,
