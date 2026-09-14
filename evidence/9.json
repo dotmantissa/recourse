@@ -1,0 +1,13 @@
+{
+  "job_id": "9",
+  "request_hash": "sha256:4f865b8f92157c77a8336ab2367d1d6a9b5080de3f2699b8fcc66bee4cdf79e0",
+  "output_hash": "sha256:6dbeb8606c44622829879a344e911dacec10fcfacdc9c6274769d78d5fabf53a",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 1393,
+  "schema_valid": true,
+  "completed_at": "2026-09-14T01:35:51.186Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0xa9bb278af5e68db1a8c0a337267739a78dfa9623a5925ae3f55102c414a744cc46c27b34ef88b116622d1b9fbbd6e8ca2b6b250fdbf8192c0eeb9cd1fe1a7d051c",
+  "receipt_hash": "c3c79ab43d7b670669c3566d1ffb5ee59e7e3d7eaeac24ac4c2dcf26af8eda4b"
+}
