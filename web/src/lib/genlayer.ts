@@ -209,7 +209,8 @@ export async function executeFundedCapability(
   nonce: string,
 ): Promise<JobResult> {
   const requestHash = await hashRequest(capability.capability_id, job.request_label, request, nonce);
-  const response = await fetch(capability.endpoint, {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = await fetch(capability.endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -225,13 +226,20 @@ export async function executeFundedCapability(
       nonce,
       request,
     }),
+    signal: AbortSignal.timeout(20_000),
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(String(body?.error || `Capability execution failed (${response.status}).`));
   }
+    if (response.status === 202) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, 4000));
+      continue;
+    }
   await verifyDelivery(body, job, capability);
   return body as JobResult;
+  }
+  throw new Error("Execution is durably queued and continues in the background. Reopen My escrows to recover the result.");
 }
 
 export async function fetchJobResult(

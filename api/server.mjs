@@ -8,6 +8,8 @@ import Ajv from "ajv";
 import JSONbig from "json-bigint";
 import "dotenv/config";
 import { deploymentScope, resultAccessMessage, validateAccessExpiry } from "../sdk/protocol.mjs";
+import { createDurableExecutor } from "./execution.mjs";
+import { createGithubStateStore } from "./github-state-store.mjs";
 import {
   HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
   parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
@@ -793,13 +795,13 @@ async function matchingJob(slug, jobId, requestHash) {
     throw new Error("this capability is served by a different provider");
   }
   const expectedPath = AGENT_DEFINITIONS[slug].endpoint;
-  if (new URL(String(capability.endpoint)).pathname !== expectedPath) {
+  if (!PUBLIC_BASE_URL || new URL(String(capability.endpoint)).toString() !== new URL(expectedPath, PUBLIC_BASE_URL).toString()) {
     throw new Error("funded job capability endpoint does not match this agent route");
   }
   return { job, capability };
 }
 
-async function completeAgentJobUnlocked(slug, payload, request) {
+async function prepareAgentJob(slug, payload, request) {
   const jobId = parseId(request.headers["x-recourse-job-id"]);
   const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
   const requestLabel = assertString(request.headers["x-recourse-request-label"], "x-recourse-request-label", 1, 240);
@@ -812,18 +814,24 @@ async function completeAgentJobUnlocked(slug, payload, request) {
   if (hashRequest(capabilityId, requestLabel, requestPayload, nonce) !== requestHash) {
     throw new Error("request payload does not match the funded request hash");
   }
+  const { job } = await matchingJob(slug, jobId, requestHash);
+  if (String(job.capability_id) !== capabilityId || job.request_label !== requestLabel) throw new Error("request metadata does not match the funded job");
+  return { slug, jobId, requestHash, requestLabel, capabilityId, nonce, requestPayload };
+}
+
+async function executePreparedJob(input) {
+  const { slug, jobId, requestHash, requestLabel, capabilityId, requestPayload } = input;
   const { job, capability } = await matchingJob(slug, jobId, requestHash);
   const existing = await readResult(jobId);
   if (existing && !storedResultMatchesJob(existing, job, capabilityId, requestLabel)) {
     throw new Error("stored result does not match the funded request");
   }
   let result = existing;
-  let receiptTxHash = "";
-  let evidenceTxHash = "";
   if (!result) {
     if (job.status !== "funded") {
       throw new Error(`job is ${job.status} and has no recoverable stored result`);
     }
+    if (Number(job.deadline_at) * 1000 <= Date.now()) throw new Error("funded job execution deadline has passed");
     const startedAt = Date.now();
     const output = await executeAgent(slug, {
       ...requestPayload,
@@ -847,9 +855,15 @@ async function completeAgentJobUnlocked(slug, payload, request) {
       receipt_signature: signed.receipt_signature,
       stored_at: new Date().toISOString(),
     };
-    await writeResult(jobId, result);
   }
+  return result;
+}
 
+async function deliverAgentResult(result, input) {
+  const { jobId } = input;
+  let receiptTxHash = "";
+  let evidenceTxHash = "";
+  await writeResult(jobId, result);
   const evidencePacket = {
     ...result.receipt,
     receipt_signature: result.receipt_signature,
@@ -877,30 +891,64 @@ async function completeAgentJobUnlocked(slug, payload, request) {
     latestJob = await readChainJson("get_job", [jobId]);
   }
   if (latestJob?.status === "receipt_submitted" && !latestJob.evidence_id) {
-    const evidenceUrl = `${requestBaseUrl(request)}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`;
+    const evidenceUrl = `${PUBLIC_BASE_URL}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`;
     evidenceTxHash = await writeChain("publish_evidence", [jobId, evidenceUrl]);
     latestJob = await readChainJson("get_job", [jobId]);
   }
   return {
     ...result,
-    evidence_url: `${requestBaseUrl(request)}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`,
+    evidence_url: `${PUBLIC_BASE_URL}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`,
     receipt_tx_hash: receiptTxHash || null,
     evidence_tx_hash: evidenceTxHash || null,
     onchain_job: latestJob,
   };
 }
 
+const executionStore = createGithubStateStore({ request: githubRequest, repository: GITHUB_REPOSITORY,
+  branch: GITHUB_EVIDENCE_BRANCH, scope: STORAGE_SCOPE, encode: encryptResult, decode: decryptResult });
+const durableExecutor = createDurableExecutor({ store: executionStore, execute: executePreparedJob, deliver: deliverAgentResult });
+
+function scheduleExecution(jobId) {
+  if (jobExecutionLocks.has(jobId)) return;
+  jobExecutionLocks.set(jobId, true);
+  void limitExecution(() => durableExecutor.run(jobId)).catch(() => {
+    console.error("Execution checkpoint unavailable; durable recovery will retry");
+  }).finally(() => jobExecutionLocks.delete(jobId));
+}
+
 async function completeAgentJob(slug, payload, request) {
-  const jobId = parseId(request.headers["x-recourse-job-id"]);
-  if (jobExecutionLocks.has(jobId)) throw new HttpError(409, "job execution is already in progress; retry later");
-  return limitExecution(async () => {
-    jobExecutionLocks.set(jobId, true);
-    try {
-      return await completeAgentJobUnlocked(slug, payload, request);
-    } finally {
-      jobExecutionLocks.delete(jobId);
+  if (!GITHUB_TOKEN) throw new HttpError(503, "durable execution storage is not configured");
+  const input = await prepareAgentJob(slug, payload, request);
+  await ensureGithubEvidenceBranch();
+  const record = await durableExecutor.enqueue(input.jobId, input.requestHash, input);
+  if (record.phase === "delivered") return record.result;
+  if (["indeterminate", "delivery_failed"].includes(record.phase)) throw new HttpError(409, "execution requires onchain recovery; work will not be repeated");
+  scheduleExecution(input.jobId);
+  return { job_id: input.jobId, request_hash: input.requestHash, execution_status: record.phase };
+}
+
+let workerTimer;
+let workerCursor = 1;
+let workerScanning = false;
+
+async function recoverExecutions() {
+  if (workerScanning || !agentAccount || !GITHUB_TOKEN || !PUBLIC_BASE_URL) return;
+  workerScanning = true;
+  try {
+    const counts = await readChainJson("get_counts");
+    const total = Number(counts?.jobs || 0);
+    if (!total) return;
+    for (let index = 0; index < Math.min(total, 8); index += 1) {
+      if (workerCursor > total) workerCursor = 1;
+      const jobId = String(workerCursor++);
+      const job = await readChainJson("get_job", [jobId]);
+      if (String(job?.provider).toLowerCase() === agentAccount.address.toLowerCase()) scheduleExecution(jobId);
     }
-  });
+  } catch {
+    console.error("Execution recovery scan unavailable; retrying on the next interval");
+  } finally {
+    workerScanning = false;
+  }
 }
 
 async function handleRequest(request, response) {
@@ -1020,7 +1068,7 @@ async function handleRequest(request, response) {
     try {
       const payload = parseObject(await readBody(request));
       const result = await completeAgentJob(slug, payload, request);
-      return json(response, 200, {
+      return json(response, result.execution_status ? 202 : 200, {
         agent: slug,
         network: "studio-next",
         chain_id: CHAIN_ID,
@@ -1250,12 +1298,16 @@ server.requestTimeout = 30000;
 server.headersTimeout = 10000;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  workerTimer = setInterval(() => void recoverExecutions(), 30_000);
+  workerTimer.unref();
+  void recoverExecutions();
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Recourse adapter listening on 0.0.0.0:${PORT}`);
   });
 }
 
 function shutdown(signal) {
+  clearInterval(workerTimer);
   console.log(`${signal} received; closing Recourse adapter`);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10_000).unref();

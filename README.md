@@ -91,12 +91,12 @@ Public-page fetches validate every DNS answer and redirect, connect only to thos
 validated addresses, allow ports 80/443, and bound the decompressed body to 1 MB.
 Their total timeout includes DNS, redirects, and body consumption.
 
-Per adapter process, at most 64 HTTP handlers, 8 job executions, and 16 public-page
-fetches run concurrently. Duplicate in-flight job execution returns `409`; exhausted
+Per adapter process, at most 64 HTTP handlers, 8 workers, and 16 public-page
+fetches run concurrently. Duplicate execution requests recover the same durable job; exhausted
 capacity returns `503`; the socket-IP limit is 240 requests/minute (`429`). Behind a
 proxy, socket-IP limits may be shared by multiple users; forwarded client-IP headers
-are not trusted. These in-memory limits and locks are not distributed leases or
-restart-safe execution guarantees. Use deployment-level rate limits as well.
+are not trusted. Rate/concurrency limits are per-process; use deployment-level
+rate limits as well. Provider execution claims are durable, as described below.
 
 The browser RPC proxy allows only the listed wallet/Studio methods, batches of at
 most 10, 256 KB requests, and 4 MB responses. Each instance allows 32 concurrent
@@ -108,8 +108,26 @@ and writable and signing, public URL, monitor, Privy, GitHub, and result-encrypt
 configuration are present. This checks local readiness, not remote credential
 validity or chain availability. Storage read errors fail closed instead of being
 treated as absent results. Evidence CLI writes reject path-like IDs and never
-overwrite an existing evidence file. Contract lifecycle, committed-output
-adjudication, and durable worker recovery remain separate audit work.
+overwrite an existing evidence file. Contract lifecycle and committed-output
+adjudication remain separate audit work.
+
+### Durable execution and recovery
+
+Execution requests are encrypted and checkpointed in GitHub before returning
+`202`. GitHub content revisions provide compare-and-set claims across adapter
+processes. The worker advances `queued → executing → executed → delivering →
+delivered`; input and output checkpoints use the deployment-scoped encryption key.
+The browser polls the same request while waiting, and a background scanner discovers
+persisted jobs after a process restart. Repeated requests never authorize a second
+execution of the same funded commitment.
+
+Delivery publication is retryable independently of execution, with eight automatic
+attempts and thirty-minute worker leases. An interrupted or failed execution is
+marked `indeterminate`, never blindly executed again: the buyer must use bounded
+onchain recovery instead. A stopped/sleeping host cannot advance the queue until
+it resumes. Keep the adapter running for autonomous progress. Transaction receipt
+publication is reconciled against onchain state; this is not a promise that a
+failed RPC response can never incur an additional transaction fee.
 
 ### Deployment isolation and result verification
 
