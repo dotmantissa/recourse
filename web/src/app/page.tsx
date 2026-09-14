@@ -51,6 +51,7 @@ import {
   fundStudioAccount,
   hashRequest,
   readBalance,
+  readCapability,
   readJob,
   readJobs,
   readReputation,
@@ -61,10 +62,12 @@ import {
 } from "@/lib/genlayer";
 import type { Capability, CapabilityRequest, Job, JobResult, Reputation } from "@/lib/types";
 import { clearPendingRequest, clearSessionInputs, loadRequestContext, recoverPendingRequestContexts, savePendingRequest, saveRequestContext } from "@/lib/request-store";
+import { validateRegistrationEndpoint } from "@/lib/provider";
+import { canDispute, recoveryReady } from "@/lib/lifecycle";
 
 type View = "console" | "guide" | "dashboard";
 type Lens = "all" | "buyer" | "provider" | "disputes";
-type Modal = "register" | "job" | "receipt" | "evidence" | "dispute" | "logout" | "none";
+type Modal = "register" | "manage" | "job" | "receipt" | "evidence" | "dispute" | "logout" | "none";
 
 const emptyState: AppState = {
   capabilities: [],
@@ -249,10 +252,12 @@ function CapabilitySpecimen({
   capability,
   address,
   onBuy,
+  onManage,
 }: {
   capability: Capability;
   address: string;
   onBuy: (capability: Capability) => void;
+  onManage: (capability: Capability) => void;
 }) {
   const available = asWei(capability.collateral_wei) - asWei(capability.reserved_collateral_wei);
   const isOwn = Boolean(address) && capability.provider.toLowerCase() === address.toLowerCase();
@@ -281,7 +286,7 @@ function CapabilitySpecimen({
       <div className="specimen-foot">
         <span className="mono">schema-bound request</span>
         {isOwn ? (
-          <span className="ownership"><BadgeCheck size={14} /> yours</span>
+          <button className="button button-line" onClick={() => onManage(capability)}><BadgeCheck size={14} /> Manage</button>
         ) : (
           <button className="button button-acid" disabled={capability.status !== "active"} onClick={() => onBuy(capability)}>
             Fund a request <ArrowUpRight size={15} />
@@ -296,7 +301,6 @@ function JobLedgerRow({
   job,
   capability,
   address,
-  monitorAddress,
   now,
   onAction,
 }: {
@@ -309,12 +313,11 @@ function JobLedgerRow({
 }) {
   const isBuyer = job.buyer.toLowerCase() === address.toLowerCase();
   const isProvider = job.provider.toLowerCase() === address.toLowerCase();
-  const isMonitor = Boolean(monitorAddress) && monitorAddress.toLowerCase() === address.toLowerCase();
   const settlementAt = isBuyer
     ? Number(job.deadline_at)
     : Math.max(Number(job.deadline_at), Number(job.challenge_deadline_at || 0));
   const settlementReady = settlementAt * 1000 <= now;
-  const timeoutReady = settlementReady;
+  const timeoutReady = Number(job.receipt_deadline_at ?? job.deadline_at) * 1000 <= now;
   const hasEvidence = Boolean(job.evidence_id);
   return (
     <article className="ledger-row">
@@ -326,10 +329,12 @@ function JobLedgerRow({
       </div>
       <div className="ledger-date"><span>deadline</span><strong>{formatDate(job.deadline_at)}</strong></div>
       <div className="ledger-actions">
-        {isProvider && job.status === "funded" && <button className="icon-button" title="Submit provider receipt" aria-label="Submit provider receipt" onClick={() => onAction("receipt", job)}><FileCheck2 size={16} /></button>}
-        {isMonitor && job.status === "receipt_submitted" && <button className="icon-button" title="Publish evidence packet" aria-label="Publish evidence packet" onClick={() => onAction("evidence", job)}><ScanLine size={16} /></button>}
-        {isBuyer && job.status === "funded" && <button className="button button-line small" disabled={!timeoutReady} title={timeoutReady ? "Claim the configured timeout refund" : `Available after ${formatDate(job.deadline_at)}`} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> {timeoutReady ? "Claim timeout" : "Claim after deadline"}</button>}
-        {isBuyer && job.status === "receipt_submitted" && <button className="button button-line small" disabled={!hasEvidence} title={hasEvidence ? "Open a quality or terms dispute" : "The public evidence packet must be published first"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> {hasEvidence ? "Dispute" : "Waiting for evidence"}</button>}
+        {isProvider && job.status === "funded" && <button className="button button-line small" disabled={Number(job.acceptance_deadline_at) * 1000 <= now} onClick={() => onAction("accept", job)}>Accept work</button>}
+        {isProvider && job.status === "accepted" && <button className="icon-button" title="Submit provider receipt" aria-label="Submit provider receipt" onClick={() => onAction("receipt", job)}><FileCheck2 size={16} /></button>}
+        {address && ["receipt_submitted", "disputed"].includes(job.status) && !hasEvidence && <button className="icon-button" title="Publish evidence packet" aria-label="Publish evidence packet" onClick={() => onAction("evidence", job)}><ScanLine size={16} /></button>}
+        {isBuyer && ["funded", "accepted"].includes(job.status) && <button className="button button-line small" disabled={!timeoutReady} title={timeoutReady ? "Claim the configured timeout refund" : `Available after ${formatDate(job.receipt_deadline_at ?? job.deadline_at)}`} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> {timeoutReady ? "Claim timeout" : "Claim after deadline"}</button>}
+        {address && recoveryReady(job, now) && <button className="button button-line small" onClick={() => onAction("recover", job)}>Recover full refund</button>}
+        {isBuyer && job.status === "receipt_submitted" && <button className="button button-line small" disabled={!canDispute(job, now)} title={canDispute(job, now) ? "Open a quality or terms dispute" : "The buyer challenge window has ended"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
         {job.status === "disputed" && <button className="button button-acid small" onClick={() => onAction("resolve", job)}><Gavel size={14} /> Resolve with validators</button>}
         {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!settlementReady || !hasEvidence} title={!hasEvidence ? "The public evidence packet must be published first" : settlementReady ? "Settle this escrow" : `Available after ${formatDate(settlementAt)}`} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {!hasEvidence ? "Waiting for evidence" : settlementReady ? "Settle" : "Settlement pending"}</button>}
         {job.status === "settled" && <span className={`outcome ${statusTone(job.outcome)}`}>{statusLabel(job.outcome)} · {bps(job.refund_bps)} back</span>}
@@ -416,8 +421,8 @@ function Guide() {
           <p>Agents can use the console for a human-guided run, or call the same contract and adapter surfaces from their own runtime.</p>
         </div>
         <ol>
-          <li><strong>Discover.</strong> Read <code>get_capabilities()</code> on the Studio Next contract and choose an active capability whose price, deadline, schema, and refund rules fit the task.</li>
-          <li><strong>Commit.</strong> Create the exact structured request and a fresh nonce. Recourse hashes the capability ID, trimmed label, request, nonce, and <code>recourse-request-v2</code> version. The hash is generated for you in the funding form.</li>
+          <li><strong>Discover.</strong> Read <code>get_capabilities_page(cursor, limit)</code> on the Studio Next contract and choose an active capability whose price, deadline, schema, and refund rules fit the task.</li>
+          <li><strong>Commit.</strong> Create the exact structured request and a fresh nonce. Recourse hashes the chain ID, contract address, capability ID, trimmed label, request, nonce, public disclosure consent, and <code>recourse-request-v3</code> version. Full request and output become public evidence. The hash is generated for you in the funding form.</li>
           <li><strong>Fund.</strong> Call <code>create_job(capability_id, request_hash, request_label)</code> with the listed GEN price as native value. The funded job and request hash appear in <strong>My escrows</strong>.</li>
           <li><strong>Execute.</strong> POST the request to the capability endpoint with the funded job ID, request hash, label, capability ID, and nonce headers. The adapter rejects mismatched commitments and cannot switch to another capability.</li>
           <li><strong>Collect.</strong> The provider returns a signed receipt and public evidence. The buyer opens <strong>My escrows</strong>, signs a one-time access message, and reveals the authenticated result there.</li>
@@ -550,7 +555,7 @@ function BuyerDashboard({
     <section className="dashboard-view">
       <div className="dashboard-intro">
         <div>
-          <span className="eyebrow">Buyer workspace / private</span>
+          <span className="eyebrow">Buyer workspace / public evidence</span>
           <h1>Every escrow has a visible next step.</h1>
         </div>
         <p>Results arrive here after the funded capability runs. The request hash is your portable receipt identity; the evidence link is what GenLayer validators inspect.</p>
@@ -559,7 +564,7 @@ function BuyerDashboard({
       <div className="dashboard-filters">
         <label className="search-field"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your request history" aria-label="Search your request history" /></label>
         <div className="status-filters">
-          {(["all", "funded", "receipt_submitted", "disputed", "settled"] as const).map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{status === "all" ? "All" : statusLabel(status)}</button>)}
+          {(["all", "funded", "accepted", "receipt_submitted", "disputed", "settled"] as const).map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{status === "all" ? "All" : statusLabel(status)}</button>)}
         </div>
       </div>
       <div className="dashboard-list">
@@ -588,9 +593,10 @@ function BuyerDashboard({
                   <button className="text-link" aria-expanded={Boolean(result && !hiddenResults[job.job_id])} aria-controls={`result-${job.job_id}`} onClick={() => result ? setHiddenResults((current) => ({ ...current, [job.job_id]: !current[job.job_id] })) : onResult(job)} disabled={resultBusy === job.job_id}>{resultBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <FileCheck2 size={14} />} {result && !hiddenResults[job.job_id] ? "Hide result" : "Reveal result"}</button>
                 </div>
                 <div className="dashboard-actions">
-                  {job.status === "funded" && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
-                  {job.status === "funded" && <button className="button button-line small" disabled={Number(job.deadline_at) * 1000 > now} title={Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Claim the configured timeout refund"} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> {Number(job.deadline_at) * 1000 > now ? "Claim after deadline" : "Claim timeout"}</button>}
-                  {job.status === "receipt_submitted" && <button className="button button-line small" disabled={!job.evidence_id} title={job.evidence_id ? "Open a quality or terms dispute" : "The public evidence packet must be published first"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> {job.evidence_id ? "Dispute" : "Waiting for evidence"}</button>}
+                  {["funded", "accepted"].includes(job.status) && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id || Number(job.deadline_at) * 1000 <= now}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
+                  {["funded", "accepted"].includes(job.status) && <button className="button button-line small" disabled={Number(job.receipt_deadline_at ?? job.deadline_at) * 1000 > now} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
+                  {recoveryReady(job, now) && <button className="button button-line small" onClick={() => onAction("recover", job)}>Recover full refund</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-line small" disabled={!canDispute(job, now)} title={canDispute(job, now) ? "Open a quality or terms dispute" : "The buyer challenge window has ended"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
                   {job.status === "disputed" && <button className="button button-acid small" onClick={() => onAction("resolve", job)}><Gavel size={14} /> Resolve with validators</button>}
                   {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!job.evidence_id || Number(job.deadline_at) * 1000 > now} title={!job.evidence_id ? "The public evidence packet must be published first" : Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Settle this escrow"} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {!job.evidence_id ? "Waiting for evidence" : Number(job.deadline_at) * 1000 > now ? "Settle after deadline" : "Settle"}</button>}
                 </div>
@@ -673,9 +679,9 @@ function PrivyHomeSession() {
   const [capabilityQuery, setCapabilityQuery] = useState("");
   const [capabilityPage, setCapabilityPage] = useState(0);
   const [registerForm, setRegisterForm] = useState({
-    name: "Verified source research",
-    endpoint: ADAPTER_URL ? `${ADAPTER_URL}/agents/research-sources/execute` : "",
-    terms: "Return five verified sources in JSON. Every item must include title, URL, and citation.",
+    name: "",
+    endpoint: "",
+    terms: "",
     deadline: "30",
     schema: '{"type":"object","required":["query","sources"],"properties":{"query":{"type":"string"},"sources":{"type":"array","minItems":5,"maxItems":5}}}',
     timeout: "100",
@@ -684,6 +690,8 @@ function PrivyHomeSession() {
     collateral: "10",
   });
   const [jobForm, setJobForm] = useState(defaultJobForm);
+  const [collateralAmount, setCollateralAmount] = useState("1");
+  const [publicEvidenceConsent, setPublicEvidenceConsent] = useState(false);
   const [receiptForm, setReceiptForm] = useState({ outputHash: "", status: "success", code: "200", latency: "1200", schemaValid: true, completedAt: "" });
   const [evidenceForm, setEvidenceForm] = useState({ url: "" });
   const [disputeForm, setDisputeForm] = useState({ type: "quality", complaint: "The returned sources do not support the requested claims." });
@@ -691,11 +699,13 @@ function PrivyHomeSession() {
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? wallets[0];
   const address = embeddedWallet?.address ?? "";
   const refreshInFlight = useRef<Promise<void> | null>(null);
+  const historyExpanded = useRef(false);
 
   useEffect(() => () => { if (address) clearSessionInputs(address); }, [address]);
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
+    historyExpanded.current = false;
     const operation = (async () => {
       setError("");
       try {
@@ -729,10 +739,10 @@ function PrivyHomeSession() {
   useEffect(() => {
     const initialRefresh = window.setTimeout(() => void refresh(), 0);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState === "visible" && !historyExpanded.current) void refresh();
     }, 30000);
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState === "visible" && !historyExpanded.current) void refresh();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
@@ -845,8 +855,42 @@ function PrivyHomeSession() {
     event.preventDefault();
     await action("register", async () => {
       const context = await walletContext();
+      await validateRegistrationEndpoint(registerForm.endpoint, context.address, ADAPTER_URL);
       return write(context.address, context.provider, "register_capability", [registerForm.name, registerForm.endpoint, registerForm.terms, BigInt(registerForm.deadline), registerForm.schema, BigInt(registerForm.timeout) * 100n, BigInt(registerForm.malformed) * 100n, parseGen(registerForm.price)], parseGen(registerForm.collateral));
     });
+  }
+
+  async function manageCapability(operation: "add" | "withdraw" | "pause") {
+    if (!selectedCapability) return;
+    await action(`collateral-${operation}`, async () => {
+      const context = await walletContext();
+      if (context.address.toLowerCase() !== selectedCapability.provider.toLowerCase()) throw new Error("Only the registered provider can manage this capability.");
+      if (operation === "pause") return write(context.address, context.provider, "pause_capability", [selectedCapability.capability_id]);
+      const amount = parseGen(collateralAmount);
+      if (amount <= 0n) throw new Error("Enter a positive collateral amount.");
+      if (operation === "add") return write(context.address, context.provider, "add_collateral", [selectedCapability.capability_id], amount);
+      if (amount > asWei(selectedCapability.collateral_wei) - asWei(selectedCapability.reserved_collateral_wei)) throw new Error("Reserved collateral cannot be withdrawn.");
+      return write(context.address, context.provider, "withdraw_collateral", [selectedCapability.capability_id, amount], 0n, [context.address]);
+    });
+  }
+
+  async function loadOlderHistory() {
+    if (!state.history || busy) return;
+    setBusy("history");
+    try {
+      const older = await loadState(state.history);
+      historyExpanded.current = true;
+      setState((current) => ({ ...current, history: older.history,
+        capabilities: [...new Map([...older.capabilities, ...current.capabilities].map((item) => [item.capability_id, item])).values()],
+        jobs: [...new Map([...older.jobs, ...current.jobs].map((item) => [item.job_id, item])).values()],
+        evidence: [...new Map([...older.evidence, ...current.evidence].map((item) => [item.evidence_id, item])).values()],
+        disputes: [...new Map([...older.disputes, ...current.disputes].map((item) => [item.dispute_id, item])).values()],
+      }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Older history could not be loaded.");
+    } finally {
+      setBusy("");
+    }
   }
 
   async function findJob(requestHash: string, buyer: string) {
@@ -863,6 +907,10 @@ function PrivyHomeSession() {
   async function createJob(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedCapability) return;
+    if (!publicEvidenceConsent) {
+      setError("Public input/output disclosure consent is required before funding.");
+      return;
+    }
     setBusy("job");
     setError("");
     setNotice("");
@@ -883,6 +931,7 @@ function PrivyHomeSession() {
       setView("dashboard");
       setModal("none");
       setNotice("Escrow funded. Locating the onchain job and starting the capability...");
+      setPublicEvidenceConsent(false);
       const job = await findJob(pendingHash, context.address);
       saveRequestContext(job, request, nonce);
       clearPendingRequest(pendingHash, job.buyer);
@@ -910,6 +959,10 @@ function PrivyHomeSession() {
     const completedAt = receiptForm.completedAt || new Date().toISOString();
     const outputHash = receiptForm.outputHash.trim().toLowerCase();
     const signed = await signReceipt(context.provider, context.address, {
+      version: "recourse-receipt-v2",
+      chain_id: selectedJob.chain_id ?? CHAIN_ID,
+      contract_address: selectedJob.contract_address ?? CONTRACT_ADDRESS.toLowerCase(),
+      capability_id: selectedJob.capability_id,
       job_id: selectedJob.job_id,
       request_hash: selectedJob.request_hash,
       output_hash: outputHash,
@@ -954,7 +1007,7 @@ function PrivyHomeSession() {
       const token = await getAccessToken();
       if (!token) throw new Error("Privy did not return an access token.");
       const context = await walletContext();
-      const capability = state.capabilities.find((item) => item.capability_id === job.capability_id);
+      const capability = state.capabilities.find((item) => item.capability_id === job.capability_id) ?? await readCapability(job.capability_id);
       if (!capability) throw new Error("The job capability could not be loaded.");
       const result = await fetchJobResult(job, capability, token, context.provider, context.address);
       setResults((current) => ({ ...current, [job.job_id]: result }));
@@ -966,9 +1019,8 @@ function PrivyHomeSession() {
   }
 
   async function executeExistingJob(job: Job) {
-    const capability = state.capabilities.find((item) => item.capability_id === job.capability_id);
     const context = loadRequestContext(job);
-    if (!capability || !context) {
+    if (!context) {
       setError("This funded request has no local input commitment available. It can still be claimed after its deadline.");
       return;
     }
@@ -976,6 +1028,8 @@ function PrivyHomeSession() {
     setError("");
     setNotice("");
     try {
+      const capability = state.capabilities.find((item) => item.capability_id === job.capability_id) ?? await readCapability(job.capability_id);
+      if (!capability) throw new Error("The registered capability could not be loaded.");
       const result = await executeFundedCapability(capability, job, context.request, context.nonce);
       setResults((current) => ({ ...current, [job.job_id]: result }));
       setNotice(`Job ${job.job_id} executed. The result is ready below.`);
@@ -992,18 +1046,20 @@ function PrivyHomeSession() {
       if (["receipt", "evidence", "dispute"].includes(actionName)) {
         setSelectedJob(job);
         if (actionName === "evidence" && ADAPTER_URL) {
-          setEvidenceForm({ url: `${ADAPTER_URL}/evidence/${job.job_id}` });
+          setEvidenceForm({ url: `${ADAPTER_URL}/evidence/${job.chain_id ?? CHAIN_ID}-${job.contract_address ?? CONTRACT_ADDRESS.toLowerCase()}/${job.job_id}` });
         }
         setModal(actionName as Modal);
         return;
       }
       const context = await walletContext();
+      if (actionName === "accept") await action(`accept-${job.job_id}`, () => write(context.address, context.provider, "accept_job", [job.job_id]));
+      if (actionName === "recover") await action(`recover-${job.job_id}`, () => write(context.address, context.provider, "recover_job", [job.job_id], 0n, [job.buyer]));
       if (actionName === "timeout") {
-        if (Number(job.deadline_at) * 1000 > Date.now()) {
-          setError(`Timeout recourse opens after the response deadline: ${formatDate(job.deadline_at)}.`);
+        if (Number(job.receipt_deadline_at ?? job.deadline_at) * 1000 > Date.now()) {
+          setError(`Timeout recourse opens after the receipt deadline: ${formatDate(job.receipt_deadline_at ?? job.deadline_at)}.`);
           return;
         }
-        await action(`timeout-${job.job_id}`, () => write(context.address, context.provider, "claim_timeout", [job.job_id], 0n, [job.buyer]));
+        await action(`timeout-${job.job_id}`, () => write(context.address, context.provider, "claim_timeout", [job.job_id], 0n, [job.buyer, job.provider]));
       }
       if (actionName === "settle") {
         if (Number(job.deadline_at) * 1000 > Date.now()) {
@@ -1135,7 +1191,7 @@ function PrivyHomeSession() {
             </div>
             <div className="capability-layout">
                 <div className="capability-list">
-                {visibleCapabilities.length ? visibleCapabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onBuy={(capability) => { setSelectedCapability(capability); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
+                {visibleCapabilities.length ? visibleCapabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onManage={(capability) => { setSelectedCapability(capability); setCollateralAmount("1"); setModal("manage"); }} onBuy={(capability) => { setSelectedCapability(capability); setPublicEvidenceConsent(false); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
                   <div className="empty-state"><Orbit size={23} /><h3>The rail is waiting for its first capability.</h3><p>Register an agent service below, then make its promise specific enough to verify.</p></div>
                 )}
               </div>
@@ -1187,10 +1243,25 @@ function PrivyHomeSession() {
         </section>
       )}
 
+      {view !== "guide" && state.history && <section className="hash-note" aria-label="Registry history">
+        <p>Loaded {state.jobs.length} jobs and {state.capabilities.length} capabilities. Each history request loads at most 50 older records per registry. Viewing older history pauses automatic refresh; refresh returns to recent activity.</p>
+        {Object.values(state.history).some((remaining) => remaining > 0) && <button className="button button-line" disabled={Boolean(busy)} onClick={() => void loadOlderHistory()}>{busy === "history" ? "Loading history…" : "Load earlier history"}</button>}
+      </section>}
+      {modal === "manage" && selectedCapability && <ModalShell eyebrow="Provider controls" title={selectedCapability.name} onClose={() => setModal("none")}>
+        <div className="form">
+          <p>Collateral: {formatGen(selectedCapability.collateral_wei)}. Reserved: {formatGen(selectedCapability.reserved_collateral_wei)}. Reservations cannot be withdrawn. Collateral backs capacity; it is not slashed for refunds.</p>
+          <Field label="Collateral amount (GEN)" name="collateralAmount" value={collateralAmount} onChange={setCollateralAmount} />
+          <div className="modal-actions">
+            <button className="button button-line" disabled={Boolean(busy)} onClick={() => void manageCapability("pause")}>{selectedCapability.status === "active" ? "Pause new jobs" : "Resume listing"}</button>
+            <button className="button button-line" disabled={Boolean(busy)} onClick={() => void manageCapability("withdraw")}>Withdraw available</button>
+            <button className="button button-acid" disabled={Boolean(busy)} onClick={() => void manageCapability("add")}>Add collateral</button>
+          </div>
+        </div>
+      </ModalShell>}
       {modal === "register" && <ModalShell eyebrow="Provider entry" title="Register a capability" onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void register(event)}><div className="form-grid"><Field label="Capability name" name="name" value={registerForm.name} onChange={(value) => setRegisterForm({ ...registerForm, name: value })} /><Field label="Public endpoint" name="endpoint" value={registerForm.endpoint} onChange={(value) => setRegisterForm({ ...registerForm, endpoint: value })} /><Field label="Deadline (seconds)" name="deadline" type="number" value={registerForm.deadline} onChange={(value) => setRegisterForm({ ...registerForm, deadline: value })} /><Field label="Price (GEN)" name="price" value={registerForm.price} onChange={(value) => setRegisterForm({ ...registerForm, price: value })} /><Field label="Collateral (GEN)" name="collateral" value={registerForm.collateral} onChange={(value) => setRegisterForm({ ...registerForm, collateral: value })} /><Field label="Timeout refund (%)" name="timeout" type="number" value={registerForm.timeout} onChange={(value) => setRegisterForm({ ...registerForm, timeout: value })} /><Field label="Malformed refund (%)" name="malformed" type="number" value={registerForm.malformed} onChange={(value) => setRegisterForm({ ...registerForm, malformed: value })} /></div><label className="field"><span>Terms</span><textarea value={registerForm.terms} onChange={(event) => setRegisterForm({ ...registerForm, terms: event.target.value })} /></label><label className="field"><span>Required output schema</span><textarea value={registerForm.schema} onChange={(event) => setRegisterForm({ ...registerForm, schema: event.target.value })} /></label><div className="modal-actions"><span className="modal-note">Collateral is held by Recourse until the request resolves.</span><button className="button button-acid" disabled={busy === "register"} type="submit">{busy === "register" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Register</button></div></form></ModalShell>}
-      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Wallet balance: {formatGen(balance)}. After funding, the live capability runs automatically and the result appears in My escrows.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><JobRequestFields capability={selectedCapability} form={jobForm} onChange={setJobForm} /><div className="hash-note"><span className="mono">request identity</span><strong>generated at funding time</strong><p>The request hash commits to this capability, label, exact input, and a one-time nonce. It is shown in My escrows and carried through the signed receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs the escrow. The adapter runs only this listed capability.</span><div className="modal-button-group"><button className="button button-line" type="button" onClick={() => void fundWallet()} disabled={busy === "faucet"}>{busy === "faucet" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Get test GEN</button><button className="button button-acid" disabled={busy === "job" || busy === "faucet"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund and run</button></div></div></form></ModalShell>}
+      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Wallet balance: {formatGen(balance)}. The adapter accepts work after funding. Full input/output become public evidence; worker availability and transaction fees affect completion.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><JobRequestFields capability={selectedCapability} form={jobForm} onChange={setJobForm} /><label className="check-field"><input type="checkbox" required checked={publicEvidenceConsent} onChange={(event) => setPublicEvidenceConsent(event.target.checked)} /> I understand that my full request and output become public, including onchain evidence. I will not submit secrets or personal data.</label><div className="hash-note"><span className="mono">request identity</span><strong>generated at funding time</strong><p>The request hash commits to this capability, label, exact input, and a one-time nonce. It is shown in My escrows and carried through the signed receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs the escrow. The adapter runs only this listed capability.</span><div className="modal-button-group"><button className="button button-line" type="button" onClick={() => void fundWallet()} disabled={busy === "faucet"}>{busy === "faucet" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Get test GEN</button><button className="button button-acid" disabled={!publicEvidenceConsent || busy === "job" || busy === "faucet"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund and run</button></div></div></form></ModalShell>}
       {modal === "receipt" && selectedJob && <ModalShell eyebrow="Provider execution" title={`Submit receipt for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void submitReceipt(event)}><Field label="Output hash" name="outputHash" value={receiptForm.outputHash} onChange={(value) => setReceiptForm({ ...receiptForm, outputHash: value })} placeholder="sha256:..." /><div className="form-grid"><label className="field"><span>Response status</span><select value={receiptForm.status} onChange={(event) => setReceiptForm({ ...receiptForm, status: event.target.value })}><option value="success">Success</option><option value="timeout">Timeout</option><option value="malformed">Malformed</option></select></label><Field label="HTTP status" name="code" type="number" value={receiptForm.code} onChange={(value) => setReceiptForm({ ...receiptForm, code: value })} /><Field label="Latency (ms)" name="latency" type="number" value={receiptForm.latency} onChange={(value) => setReceiptForm({ ...receiptForm, latency: value })} /></div><label className="check-field"><input type="checkbox" checked={receiptForm.schemaValid} onChange={(event) => setReceiptForm({ ...receiptForm, schemaValid: event.target.checked })} /> Output matched the required schema</label><div className="modal-actions"><span className="modal-note">Your embedded wallet signs the canonical receipt.</span><button className="button button-acid" disabled={busy === "receipt"} type="submit">{busy === "receipt" ? <LoaderCircle className="spin" size={15} /> : <FileCheck2 size={15} />} Sign and commit</button></div></form></ModalShell>}
-      {modal === "evidence" && selectedJob && <ModalShell eyebrow="Monitor evidence" title={`Publish evidence for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void publishEvidence(event)}><Field label="Public evidence URL" name="url" value={evidenceForm.url} onChange={(value) => setEvidenceForm({ url: value })} placeholder="https://adapter.example.com/evidence/..." /><div className="evidence-callout"><ScanLine size={18} /><span>Validators fetch this JSON themselves. It must match the provider’s signed receipt exactly.</span></div><div className="modal-actions"><span className="modal-note">Monitor access is enforced by the contract.</span><button className="button button-acid" disabled={busy === "evidence"} type="submit">{busy === "evidence" ? <LoaderCircle className="spin" size={15} /> : <ScanLine size={15} />} Publish evidence</button></div></form></ModalShell>}
+      {modal === "evidence" && selectedJob && <ModalShell eyebrow="Public evidence" title={`Publish evidence for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void publishEvidence(event)}><Field label="Public evidence URL" name="url" value={evidenceForm.url} onChange={(value) => setEvidenceForm({ url: value })} placeholder="https://adapter.example.com/evidence/..." /><div className="evidence-callout"><ScanLine size={18} /><span>Validators fetch this JSON themselves. It must match the provider’s signed receipt exactly.</span></div><div className="modal-actions"><span className="modal-note">Anyone may publish; the contract verifies and caches committed content.</span><button className="button button-acid" disabled={busy === "evidence"} type="submit">{busy === "evidence" ? <LoaderCircle className="spin" size={15} /> : <ScanLine size={15} />} Publish evidence</button></div></form></ModalShell>}
       {modal === "dispute" && selectedJob && <ModalShell eyebrow="Onchain justice" title={`Open recourse for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void openDispute(event)}><label className="field"><span>Dispute type</span><select value={disputeForm.type} onChange={(event) => setDisputeForm({ ...disputeForm, type: event.target.value })}><option value="quality">Quality</option><option value="terms">Terms</option></select></label><label className="field"><span>Complaint</span><textarea value={disputeForm.complaint} onChange={(event) => setDisputeForm({ ...disputeForm, complaint: event.target.value })} required /></label><div className="modal-actions"><span className="modal-note">Validators receive the signed evidence and complaint.</span><button className="button button-acid" disabled={busy === "dispute"} type="submit">{busy === "dispute" ? <LoaderCircle className="spin" size={15} /> : <Gavel size={15} />} Open dispute</button></div></form></ModalShell>}
       {modal === "logout" && <ModalShell eyebrow="Session control" title="Log out of Recourse?" onClose={() => setModal("none")}><div className="logout-confirm"><p>Your Studio Next embedded wallet stays available only while this session is connected. Any funded escrows remain onchain and visible when you sign in again.</p><div className="modal-actions"><button className="button button-ghost" onClick={() => setModal("none")}><Check size={15} /> Stay connected</button><button className="button button-dark" onClick={() => { setModal("none"); void logout(); }}><LogOut size={15} /> Log out</button></div></div></ModalShell>}
     </main>

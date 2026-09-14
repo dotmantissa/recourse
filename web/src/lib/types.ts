@@ -17,6 +17,9 @@ export type Capability = {
 };
 
 export type Job = {
+  protocol_version?: number;
+  chain_id?: number;
+  contract_address?: string;
   job_id: string;
   capability_id: string;
   buyer: string;
@@ -26,7 +29,7 @@ export type Job = {
   escrow_wei: number | string;
   funded_at: number;
   deadline_at: number;
-  status: "funded" | "receipt_submitted" | "disputed" | "settled";
+  status: "funded" | "accepted" | "receipt_submitted" | "disputed" | "settled";
   receipt_hash: string;
   evidence_id: string;
   dispute_id: string;
@@ -36,6 +39,11 @@ export type Job = {
   provider_payout_wei: number | string;
   rule_ids: string[];
   challenge_deadline_at?: number;
+  acceptance_deadline_at?: number;
+  accepted_at?: number;
+  receipt_deadline_at?: number;
+  evidence_deadline_at?: number;
+  resolution_deadline_at?: number;
 };
 
 export type Receipt = {
@@ -72,6 +80,9 @@ export type Dispute = {
   rule_ids: string[];
   opened_at: number;
   resolved_at: number;
+  resolution_deadline_at?: number;
+  rationale?: string;
+  supporting_quotes?: { source: string; quote: string }[];
 };
 
 export type Reputation = {
@@ -87,6 +98,8 @@ export type Reputation = {
 export type CapabilityRequest = Record<string, unknown>;
 
 export type JobResult = {
+  request_json?: string;
+  output_json?: string;
   job_id: string;
   capability_id: string;
   request_hash: string;
@@ -94,6 +107,10 @@ export type JobResult = {
   request: CapabilityRequest | null;
   output: unknown;
   receipt: {
+    version?: string;
+    chain_id?: number;
+    contract_address?: string;
+    capability_id?: string;
     job_id: string;
     request_hash: string;
     output_hash: string;

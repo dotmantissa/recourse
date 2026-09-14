@@ -9,7 +9,8 @@ import {
 import { studioDevnet } from "genlayer-js/chains";
 import JSONbig from "json-bigint";
 import { ADAPTER_URL, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from "./config";
-import { resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
+import { requestCommitment, resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
+import { loadRegistry, type HistoryCursor } from "./history";
 import type {
   Capability,
   Dispute,
@@ -36,6 +37,7 @@ export type WalletProvider = {
 };
 
 export type AppState = {
+  history?: HistoryCursor;
   capabilities: Capability[];
   jobs: Job[];
   receipts: Record<string, Receipt>;
@@ -185,13 +187,7 @@ export async function hashRequest(
   request: CapabilityRequest | null,
   nonce: string,
 ) {
-  const canonical = canonicalJson({
-    capability_id: String(capabilityId),
-    request: request ?? null,
-    request_label: String(requestLabel).trim(),
-    nonce: String(nonce).trim(),
-    version: "recourse-request-v2",
-  });
+  const canonical = requestCommitment({ chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, capabilityId, requestLabel, request, nonce });
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(canonical),
@@ -275,30 +271,27 @@ export async function fetchJobResult(
   return body as JobResult;
 }
 
-export async function loadState(): Promise<AppState> {
-  const [capabilities, jobs, evidence, disputes] = await Promise.all([
-    read("get_capabilities"),
-    read("get_jobs"),
-    read("get_evidence_records"),
-    read("get_disputes"),
-  ]);
-  return {
-    capabilities: parse<Capability[]>(capabilities || "[]"),
-    jobs: parse<Job[]>(jobs || "[]"),
-    receipts: {},
-    evidence: parse<EvidenceRecord[]>(evidence || "[]"),
-    disputes: parse<Dispute[]>(disputes || "[]"),
-  };
+export async function loadState(cursor?: HistoryCursor): Promise<AppState> {
+  if (!CONTRACT_ADDRESS) return { capabilities: [], jobs: [], receipts: {}, evidence: [], disputes: [] };
+  const registry = await loadRegistry(async (method, args) => parse(await read(method, args)), cursor);
+  return { ...registry, receipts: {} };
 }
 
 export async function readJobs(): Promise<Job[]> {
-  return parse<Job[]>(await read("get_jobs") || "[]");
+  const counts = parse<{ jobs: number }>(await read("get_counts"));
+  const cursor = Math.max(0, counts.jobs - 50);
+  return parse<{ items: Job[] }>(await read("get_jobs_page", [BigInt(cursor), 50n])).items;
 }
 
 export async function readJob(jobId: string): Promise<Job | null> {
   const value = await read("get_job", [jobId]);
   if (!value) return null;
   return parse<Job>(value);
+}
+
+export async function readCapability(capabilityId: string): Promise<Capability | null> {
+  const value = await read("get_capability", [capabilityId]);
+  return value ? parse<Capability>(value) : null;
 }
 
 export async function readReputation(address: string): Promise<Reputation | null> {
@@ -463,6 +456,10 @@ export async function signReceipt(
   provider: WalletProvider,
   address: string,
   receipt: {
+    version: "recourse-receipt-v2";
+    chain_id: number;
+    contract_address: string;
+    capability_id: string;
     job_id: string;
     request_hash: string;
     output_hash: string;

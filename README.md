@@ -1,11 +1,20 @@
 # Recourse
 
-Recourse is a request-level escrow and automatic chargeback rail for agents
-buying services from other agents or APIs.
+Recourse is a request-level native-GEN escrow and recourse protocol for agents
+buying services from other agents or APIs. Its HTTP handshake is custom, not
+an interoperable x402 payment scheme.
+
+This checkout targets **protocol v2**, requiring a coordinated fresh contract,
+adapter and browser release. The historical deployment is not migrated merely
+by building this checkout. See `PROTOCOL.md` for lifecycle and disclosure rules
+and `CONTRACT_TOOLCHAIN.md` for reproducible pinned contract checks. Legacy
+operational/demo smoke scripts still require migration before release use.
 
 An agent can pay for a single capability with explicit terms. The provider
 returns a signed execution receipt. A public evidence packet lets GenLayer
-verify the request, receipt, latency, response status, and output schema. Valid
+verify request/output commitments and output schema, and apply timing/status
+rules to provider-signed measurements. These measurements are not independent
+network observations. Valid
 jobs settle to the provider; breached jobs refund the buyer; semantic disputes
 are adjudicated by GenLayer and settle from the same escrow.
 
@@ -14,20 +23,23 @@ are adjudicated by GenLayer and settle from the same escrow.
 1. A provider registers an agent or API capability with a public endpoint,
    request terms, deadline, required output schema, compensation rules, and
    collateral.
-2. A buyer creates a job and funds the exact price into escrow.
-3. The selected live capability executes the structured request and the
+2. A buyer explicitly consents to public input/output evidence and funds the
+   exact price into escrow. Never submit secrets or personal data.
+3. The provider accepts the job, then executes the structured request and
    provider publishes a signed execution receipt containing the request hash,
    output hash, response status, and completion timestamp.
-4. The adapter stores the result encrypted for the buyer, then a monitor
-   publishes a public evidence packet.
+4. The adapter encrypts private delivery checkpoints. Anyone can publish the
+   complete public evidence packet, which the contract verifies and caches.
+   Published request/output content is not confidential.
 5. The buyer opens **My escrows** to retrieve the result, inspect evidence, and
    settle an objectively valid job or open a dispute.
 6. GenLayer independently verifies the evidence and, for quality disputes,
    compares stable decision fields from independent validator runs.
 7. The escrow pays the provider or buyer and updates provider reputation.
 
-The built-in Source Scout capability is a live research API that returns five
-verified sources in JSON. Its default terms are:
+The built-in Source Scout capability queries Crossref for five scholarly
+citations in JSON. It does not independently establish that a citation supports
+the buyer's claim. Its default terms are:
 
 - price: configured onchain per capability
 - deadline: 30 seconds
@@ -191,6 +203,19 @@ different public repository only when the raw evidence URL should point
 elsewhere.
 
 ## Live test agents
+
+Provider-owned listings expose **Manage** controls for collateral top-up,
+available-collateral withdrawal, and pause/resume. Reserved collateral cannot
+be withdrawn. Registration starts with a blank provider endpoint: the hosted
+adapter can only serve its configured signer, not any wallet that registers its
+URL. Independent providers must deploy/configure their own endpoint and signer.
+The browser checks ownership against the hosted `/agents` manifest before
+registration; the contract still enforces provider authorization on writes.
+
+The browser loads at most 50 recent records per registry and provides explicit
+older-history loading. Browsing history pauses automatic refresh; manual
+refresh returns to recent records. It shows acceptance, receipt-deadline
+timeouts, permissionless full-refund recovery, and the buyer challenge cutoff.
 
 The adapter exposes five bounded service agents. They use real public inputs
 and return real results; they are not seeded or mocked responses:
