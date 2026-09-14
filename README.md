@@ -111,6 +111,29 @@ treated as absent results. Evidence CLI writes reject path-like IDs and never
 overwrite an existing evidence file. Contract lifecycle, committed-output
 adjudication, and durable worker recovery remain separate audit work.
 
+### Deployment isolation and result verification
+
+Evidence and encrypted results are stored under `<chain-id>-<contract-address>/`.
+New evidence URLs include that scope. Historical unscoped evidence URLs remain
+read-only and continue to address the original files; they never resolve to a new
+deployment's job with the same numeric ID. AES-GCM authenticates the deployment
+scope as additional data. Existing unscoped ciphertext is retained, not silently
+reassigned to another contract. A clean contract release must use its own scope.
+
+Result access signatures bind the deployment, job, request hash, buyer wallet,
+provider origin, and an expiry of at most five minutes. The browser retrieves
+results from the registered provider's origin and never forwards its Privy token
+to an unrelated provider. Providers implementing this recovery route must enforce
+the scoped wallet signature; the hosted adapter additionally requires Privy.
+
+`sdk/protocol.mjs` supplies the shared access-message and delivery-verification
+helpers. The browser recomputes the output and receipt hashes, checks job/provider
+identity, and verifies the provider signature before rendering a result. This
+proves authenticity and integrity, not semantic correctness. Request inputs and
+nonces are wallet/deployment-scoped in tab session storage, survive reloads in that
+tab, and are cleared on logout or wallet change. They are not saved in persistent
+local storage. Save recovery material separately if it must survive closing the tab.
+
 Copy `.env.example` to `.env` and keep the deployment key outside Git.
 
 ```bash

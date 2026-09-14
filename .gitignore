@@ -16,6 +16,7 @@ deploy/addresses.json
 deploy/*.local.json
 web/.env.local
 evidence/*.json
+evidence/*/*.json
 results/
 .runtime/
 .demo/

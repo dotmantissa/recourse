@@ -60,6 +60,7 @@ import {
   type WalletProvider,
 } from "@/lib/genlayer";
 import type { Capability, CapabilityRequest, Job, JobResult, Reputation } from "@/lib/types";
+import { clearPendingRequest, clearSessionInputs, loadRequestContext, recoverPendingRequestContexts, savePendingRequest, saveRequestContext } from "@/lib/request-store";
 
 type View = "console" | "guide" | "dashboard";
 type Lens = "all" | "buyer" | "provider" | "disputes";
@@ -89,70 +90,6 @@ function statusTone(status: string) {
 
 function statusLabel(status: string) {
   return status.replaceAll("_", " ");
-}
-
-function requestStorageKey(jobId: string) {
-  return `recourse:request:${jobId}`;
-}
-
-function pendingRequestStorageKey(requestHash: string) {
-  return `recourse:pending:${requestHash}`;
-}
-
-function saveRequestContext(jobId: string, request: CapabilityRequest | null, nonce: string) {
-  window.localStorage.setItem(requestStorageKey(jobId), JSON.stringify({ request, nonce }));
-}
-
-function savePendingRequest(
-  requestHash: string,
-  value: {
-    buyer: string;
-    capabilityId: string;
-    requestLabel: string;
-    request: CapabilityRequest | null;
-    nonce: string;
-  },
-) {
-  window.localStorage.setItem(
-    pendingRequestStorageKey(requestHash),
-    JSON.stringify({ ...value, createdAt: Date.now() }),
-  );
-}
-
-function clearPendingRequest(requestHash: string) {
-  window.localStorage.removeItem(pendingRequestStorageKey(requestHash));
-}
-
-function recoverPendingRequestContexts(jobs: Job[]) {
-  for (let index = 0; index < window.localStorage.length; index += 1) {
-    const key = window.localStorage.key(index);
-    if (!key?.startsWith("recourse:pending:")) continue;
-    try {
-      const pending = JSON.parse(window.localStorage.getItem(key) || "null");
-      if (Date.now() - Number(pending?.createdAt || 0) > 86_400_000) {
-        window.localStorage.removeItem(key);
-        index -= 1;
-        continue;
-      }
-      const job = jobs.find((item) =>
-        item.request_hash.toLowerCase() === key.slice("recourse:pending:".length).toLowerCase()
-        && item.buyer.toLowerCase() === String(pending?.buyer || "").toLowerCase(),
-      );
-      if (!job || typeof pending?.nonce !== "string") continue;
-      saveRequestContext(job.job_id, pending.request ?? null, pending.nonce);
-      clearPendingRequest(job.request_hash);
-      index -= 1;
-    } catch {}
-  }
-}
-
-function loadRequestContext(jobId: string): { request: CapabilityRequest | null; nonce: string } | null {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(requestStorageKey(jobId)) || "null");
-    return value && typeof value.nonce === "string" ? value : null;
-  } catch {
-    return null;
-  }
 }
 
 function capabilitySlug(capability: Capability) {
@@ -662,7 +599,7 @@ function BuyerDashboard({
                 <div className="result-drawer" id={`result-${job.job_id}`}>
                   <div className="result-drawer-head"><span className="eyebrow">Delivered output</span><span className="mono">{result.receipt.output_hash}</span></div>
                   <pre><code>{JSON.stringify(result.output, null, 2)}</code></pre>
-                  <div className="result-receipt"><span><BadgeCheck size={14} /> signed receipt verified by adapter</span><span>{result.receipt.latency_ms}ms · {result.receipt.response_status}</span></div>
+                  <div className="result-receipt"><span><BadgeCheck size={14} /> output hash and provider signature verified locally</span><span>{result.receipt.latency_ms}ms · {result.receipt.response_status}</span></div>
                 </div>
               )}
             </article>
@@ -709,6 +646,13 @@ function JobRequestFields({
 }
 
 function PrivyHome() {
+  const { authenticated } = usePrivy();
+  const { wallets } = useWallets();
+  const wallet = wallets.find((item) => item.walletClientType === "privy") ?? wallets[0];
+  return <PrivyHomeSession key={`${authenticated}:${wallet?.address.toLowerCase() ?? ""}`} />;
+}
+
+function PrivyHomeSession() {
   const { ready, authenticated, login, logout, getAccessToken } = usePrivy();
   const { wallets } = useWallets();
   const [view, setView] = useState<View>("console");
@@ -747,6 +691,8 @@ function PrivyHome() {
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? wallets[0];
   const address = embeddedWallet?.address ?? "";
   const refreshInFlight = useRef<Promise<void> | null>(null);
+
+  useEffect(() => () => { if (address) clearSessionInputs(address); }, [address]);
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -938,8 +884,8 @@ function PrivyHome() {
       setModal("none");
       setNotice("Escrow funded. Locating the onchain job and starting the capability...");
       const job = await findJob(pendingHash, context.address);
-      saveRequestContext(job.job_id, request, nonce);
-      clearPendingRequest(pendingHash);
+      saveRequestContext(job, request, nonce);
+      clearPendingRequest(pendingHash, job.buyer);
       try {
         const result = await executeFundedCapability(selectedCapability, job, request, nonce);
         setResults((current) => ({ ...current, [job.job_id]: result }));
@@ -1008,7 +954,9 @@ function PrivyHome() {
       const token = await getAccessToken();
       if (!token) throw new Error("Privy did not return an access token.");
       const context = await walletContext();
-      const result = await fetchJobResult(job, token, context.provider, context.address);
+      const capability = state.capabilities.find((item) => item.capability_id === job.capability_id);
+      if (!capability) throw new Error("The job capability could not be loaded.");
+      const result = await fetchJobResult(job, capability, token, context.provider, context.address);
       setResults((current) => ({ ...current, [job.job_id]: result }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The result could not be retrieved.");
@@ -1019,7 +967,7 @@ function PrivyHome() {
 
   async function executeExistingJob(job: Job) {
     const capability = state.capabilities.find((item) => item.capability_id === job.capability_id);
-    const context = loadRequestContext(job.job_id);
+    const context = loadRequestContext(job);
     if (!capability || !context) {
       setError("This funded request has no local input commitment available. It can still be claimed after its deadline.");
       return;

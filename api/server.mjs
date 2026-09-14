@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
 import JSONbig from "json-bigint";
 import "dotenv/config";
+import { deploymentScope, resultAccessMessage, validateAccessExpiry } from "../sdk/protocol.mjs";
 import {
   HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
   parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
@@ -24,8 +25,8 @@ import { verifyMessage } from "viem";
 
 const PORT = Number(process.env.PORT || 8787);
 const MONITOR_SECRET = process.env.MONITOR_SECRET || "";
-const EVIDENCE_DIR = resolve(process.env.EVIDENCE_DIR || "evidence");
-const RESULT_DIR = resolve(process.env.RESULT_DIR || "results");
+const EVIDENCE_ROOT = resolve(process.env.EVIDENCE_DIR || "evidence");
+const RESULT_ROOT = resolve(process.env.RESULT_DIR || "results");
 const RESULT_ENCRYPTION_KEY = process.env.RESULT_ENCRYPTION_KEY || "";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 const FRONTEND_ORIGIN = (process.env.FRONTEND_ORIGIN || "").replace(/\/+$/, "");
@@ -38,6 +39,9 @@ const CONTRACT_ADDRESS =
   process.env.RECOURSE_CONTRACT_ADDRESS ||
   "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35";
 const CHAIN_ID = 61997;
+const STORAGE_SCOPE = deploymentScope(CHAIN_ID, CONTRACT_ADDRESS);
+const EVIDENCE_DIR = resolve(EVIDENCE_ROOT, STORAGE_SCOPE);
+const RESULT_DIR = resolve(RESULT_ROOT, STORAGE_SCOPE);
 const RPC_URL = "https://studio-dev.genlayer.com/api";
 const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID || "";
@@ -120,7 +124,7 @@ function corsHeaders(request, isPublic = false) {
   return allowedOrigin
     ? {
         "Access-Control-Allow-Origin": allowedOrigin,
-      "Access-Control-Allow-Headers": "authorization, content-type, x-payment, x-recourse-job-id, x-recourse-request-hash, x-recourse-request-label, x-recourse-capability-id, x-recourse-request-nonce, x-recourse-wallet, x-recourse-signature",
+      "Access-Control-Allow-Headers": "authorization, content-type, x-payment, x-recourse-job-id, x-recourse-request-hash, x-recourse-request-label, x-recourse-capability-id, x-recourse-request-nonce, x-recourse-wallet, x-recourse-signature, x-recourse-expires-at",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       ...(isPublic ? { "Access-Control-Expose-Headers": "PAYMENT-REQUIRED" } : {}),
       Vary: "Origin",
@@ -178,12 +182,14 @@ function encryptionKey() {
 function encryptResult(value) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  cipher.setAAD(Buffer.from(STORAGE_SCOPE));
   const ciphertext = Buffer.concat([
     cipher.update(JSON.stringify(value), "utf8"),
     cipher.final(),
   ]);
   return {
-    version: 1,
+    version: 2,
+    scope: STORAGE_SCOPE,
     algorithm: "aes-256-gcm",
     iv: iv.toString("base64"),
     tag: cipher.getAuthTag().toString("base64"),
@@ -192,7 +198,7 @@ function encryptResult(value) {
 }
 
 function decryptResult(packet) {
-  if (packet?.version !== 1 || packet?.algorithm !== "aes-256-gcm") {
+  if (packet?.version !== 2 || packet?.scope !== STORAGE_SCOPE || packet?.algorithm !== "aes-256-gcm") {
     throw new Error("stored result format is invalid");
   }
   const decipher = createDecipheriv(
@@ -200,6 +206,7 @@ function decryptResult(packet) {
     encryptionKey(),
     Buffer.from(String(packet.iv), "base64"),
   );
+  decipher.setAAD(Buffer.from(STORAGE_SCOPE));
   decipher.setAuthTag(Buffer.from(String(packet.tag), "base64"));
   const plaintext = Buffer.concat([
     decipher.update(Buffer.from(String(packet.ciphertext), "base64")),
@@ -243,10 +250,6 @@ async function authenticate(request) {
   const token = String(request.headers.authorization || "").replace(/^Bearer\s+/i, "").trim();
   if (!token) throw new Error("Privy access token is required");
   return getPrivyClient().utils().auth().verifyAccessToken(token);
-}
-
-function resultAccessMessage(jobId, requestHash) {
-  return `Recourse result access: ${jobId}:${requestHash}`;
 }
 
 function parseInteger(value, field, minimum = 0) {
@@ -400,10 +403,7 @@ async function executeAgent(slug, payload) {
 }
 
 async function signedAgentReceipt(slug, payload, output, startedAt, provider) {
-  const outputText = JSON.stringify(output, (_, value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]));
-  });
+  const outputText = canonicalJson(output);
   const outputHash = `sha256:${createHash("sha256").update(outputText).digest("hex")}`;
   const requestHash = String(payload.request_hash);
   const schemaValid = payload.schema_valid === true;
@@ -492,19 +492,21 @@ function storedResultMatchesJob(result, job, capabilityId, requestLabel) {
     && String(result.receipt?.provider || "").toLowerCase() === String(job.provider || "").toLowerCase();
 }
 
-async function readPacket(jobId) {
+async function readPacket(jobId, scope = STORAGE_SCOPE) {
+  parseId(jobId);
+  if (scope && !/^[1-9][0-9]*-0x[a-f0-9]{40}$/.test(scope)) throw new HttpError(400, "invalid evidence scope");
   try {
-    return JSON.parse(await readFile(packetPath(jobId), "utf8"));
+    return JSON.parse(await readFile(resolve(EVIDENCE_ROOT, scope, `${jobId}.json`), "utf8"));
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  return readGithubFile("evidence", jobId);
+  return readGithubFile("evidence", jobId, scope);
 }
 
-async function readGithubFile(directory, jobId) {
+async function readGithubFile(directory, jobId, scope = STORAGE_SCOPE) {
   if (!GITHUB_TOKEN) return null;
   const response = await githubRequest(
-    `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
+    `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${scope ? `${scope}/` : ""}${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
   );
   return decodeGithubFileResponse(response);
 }
@@ -567,7 +569,7 @@ async function writeGithubFile(directory, jobId, packet, message) {
   if (!GITHUB_TOKEN) return;
   const operation = githubWriteQueue.then(async () => {
     await ensureGithubEvidenceBranch();
-    const path = `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json`;
+    const path = `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}.json`;
     const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
     let sha;
     if (existing.ok) sha = JSON.parse(await readTextLimited(existing, 2_000_000)).sha;
@@ -875,13 +877,13 @@ async function completeAgentJobUnlocked(slug, payload, request) {
     latestJob = await readChainJson("get_job", [jobId]);
   }
   if (latestJob?.status === "receipt_submitted" && !latestJob.evidence_id) {
-    const evidenceUrl = `${requestBaseUrl(request)}/evidence/${encodeURIComponent(jobId)}`;
+    const evidenceUrl = `${requestBaseUrl(request)}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`;
     evidenceTxHash = await writeChain("publish_evidence", [jobId, evidenceUrl]);
     latestJob = await readChainJson("get_job", [jobId]);
   }
   return {
     ...result,
-    evidence_url: `${requestBaseUrl(request)}/evidence/${encodeURIComponent(jobId)}`,
+    evidence_url: `${requestBaseUrl(request)}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(jobId)}`,
     receipt_tx_hash: receiptTxHash || null,
     evidence_tx_hash: evidenceTxHash || null,
     onchain_job: latestJob,
@@ -1043,6 +1045,8 @@ async function handleRequest(request, response) {
       if (!job) return json(response, 404, { error: "job not found" }, restrictedCors);
       const wallet = String(request.headers["x-recourse-wallet"] || "").trim();
       const signature = String(request.headers["x-recourse-signature"] || "").trim();
+      const expiresAt = Number(request.headers["x-recourse-expires-at"]);
+      validateAccessExpiry(expiresAt);
       if (!/^0x[a-fA-F0-9]{40}$/.test(wallet) || wallet.toLowerCase() !== String(job.buyer).toLowerCase()) {
         return json(response, 403, { error: "result belongs to a different buyer" }, restrictedCors);
       }
@@ -1051,7 +1055,8 @@ async function handleRequest(request, response) {
       }
       const verified = await verifyMessage({
         address: wallet,
-        message: resultAccessMessage(job.job_id, job.request_hash),
+        message: resultAccessMessage({ chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, jobId: job.job_id,
+          requestHash: job.request_hash, wallet, audience: PUBLIC_BASE_URL, expiresAt }),
         signature,
       });
       if (!verified) return json(response, 403, { error: "wallet authorization is invalid" }, restrictedCors);
@@ -1072,9 +1077,12 @@ async function handleRequest(request, response) {
   }
 
   if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {
-    const jobId = decodeSegment(url.pathname.slice("/evidence/".length));
+    const segments = url.pathname.slice("/evidence/".length).split("/");
+    const scope = segments.length === 1 ? "" : decodeSegment(segments[0]);
+    const jobId = decodeSegment(segments.at(-1));
     try {
-      const packet = await readPacket(jobId);
+      if (segments.length > 2) throw new HttpError(400, "invalid evidence path");
+      const packet = await readPacket(jobId, scope);
       return packet
         ? json(response, 200, packet, publicCors)
         : json(response, 404, { error: "evidence not found" }, publicCors);
@@ -1137,7 +1145,7 @@ async function handleRequest(request, response) {
         );
       }
       if (!existing) await writePacket(core.job_id, packet);
-      const evidenceUrl = `${requestBaseUrl(request)}/evidence/${encodeURIComponent(core.job_id)}`;
+      const evidenceUrl = `${requestBaseUrl(request)}/evidence/${STORAGE_SCOPE}/${encodeURIComponent(core.job_id)}`;
       return json(
         response,
         existing ? 200 : 201,
@@ -1263,6 +1271,8 @@ export {
   parseObject,
   parseChainJson,
   decodeGithubFileResponse,
+  encryptResult,
+  decryptResult,
   assertPublicUrl,
   evidenceMatchesChain,
   hashRequest,

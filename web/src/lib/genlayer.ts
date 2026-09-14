@@ -8,7 +8,8 @@ import {
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 import JSONbig from "json-bigint";
-import { ADAPTER_URL, CONTRACT_ADDRESS, RPC_URL } from "./config";
+import { ADAPTER_URL, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from "./config";
+import { resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
 import type {
   Capability,
   Dispute,
@@ -201,10 +202,6 @@ export async function hashRequest(
   return `sha256:${hex}`;
 }
 
-export function resultAccessMessage(jobId: string, requestHash: string) {
-  return `Recourse result access: ${jobId}:${requestHash}`;
-}
-
 export async function executeFundedCapability(
   capability: Capability,
   job: Job,
@@ -233,34 +230,40 @@ export async function executeFundedCapability(
   if (!response.ok) {
     throw new Error(String(body?.error || `Capability execution failed (${response.status}).`));
   }
+  await verifyDelivery(body, job, capability);
   return body as JobResult;
 }
 
 export async function fetchJobResult(
   job: Job,
+  capability: Capability,
   accessToken: string,
   provider: WalletProvider,
   address: string,
 ): Promise<JobResult> {
+  const audience = new URL(capability.endpoint).origin;
+  const expiresAt = Math.floor(Date.now() / 1000) + 180;
   const signature = await provider.request({
     method: "personal_sign",
-    params: [resultAccessMessage(job.job_id, job.request_hash), address],
+    params: [resultAccessMessage({ chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, jobId: job.job_id,
+      requestHash: job.request_hash, wallet: address, audience, expiresAt }), address],
   });
   if (typeof signature !== "string" || !signature) {
     throw new Error("The wallet did not authorize access to this result.");
   }
-  if (!ADAPTER_URL) throw new Error("The result adapter is not configured.");
-  const response = await fetch(`${ADAPTER_URL}/results/${encodeURIComponent(job.job_id)}`, {
+  const response = await fetch(`${audience}/results/${encodeURIComponent(job.job_id)}`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
+      ...(ADAPTER_URL && audience === new URL(ADAPTER_URL).origin ? { Authorization: `Bearer ${accessToken}` } : {}),
       "x-recourse-wallet": address,
       "x-recourse-signature": signature,
+      "x-recourse-expires-at": String(expiresAt),
     },
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(String(body?.error || `Result retrieval failed (${response.status}).`));
   }
+  await verifyDelivery(body, job, capability);
   return body as JobResult;
 }
 
