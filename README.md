@@ -202,6 +202,35 @@ can run on a freshly funded Studio Dev account. Set `GITHUB_REPOSITORY` to a
 different public repository only when the raw evidence URL should point
 elsewhere.
 
+## Browser transaction safety
+
+Every contract write shows the value, protocol fee budget, combined budget and
+internal payout-recipient count before opening the wallet. Quotes expire after
+two minutes. Network/wallet costs may be additional; unsuccessful execution can
+still incur fees and escrow refunds do not reimburse them.
+
+Before submission, the browser saves an intent in local storage scoped to the
+chain, contract and wallet. It then saves the returned transaction ID before
+polling. Only public operation metadata is persisted here, not request bodies,
+nonces, keys or raw calldata. Web Locks prevent concurrent writes from tabs in
+the same browser profile. A pending intent blocks further app writes for that
+scope; this is not a lock on another browser, device, or wallet application.
+
+After a timeout/reload, use **Check finality** to read the original transaction,
+not send another one. Polling is bounded to six status reads per check. The app
+checks the transaction's sender/recipient and waits for finality, not merely
+acceptance. Definite wallet rejection and terminal failure are distinguished
+from unknown broadcast outcomes.
+
+If the browser stops after broadcast but before saving the returned ID, the
+intent stays blocked. Check wallet/explorer history and retain any transaction
+ID; do not retry uncertain writes. The manual clear control is only for an
+intent you have verified was **never broadcast**; it does not cancel a chain
+transaction. Corrupt or unavailable local storage fails closed. Recovery of
+known IDs is automatic/read-only; no-ID broadcast gaps still require operator
+reconciliation. Pending public metadata deliberately survives logout; private
+request inputs do not.
+
 ## Live test agents
 
 Provider-owned listings expose **Manage** controls for collateral top-up,

@@ -7,10 +7,12 @@ import {
   MessageType,
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
+import { transactionsStatusNumberToName, type TransactionHash } from "genlayer-js/types";
 import JSONbig from "json-bigint";
 import { ADAPTER_URL, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from "./config";
 import { requestCommitment, resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
 import { loadRegistry, type HistoryCursor } from "./history";
+import { acknowledgeUnbroadcastTransaction, readPendingTransaction, resumeTrackedTransaction, submitTrackedTransaction, transactionOutcome, type FeeQuote, type PendingTransaction } from "./transactions";
 import type {
   Capability,
   Dispute,
@@ -349,7 +351,7 @@ function writer(address: string, provider: WalletProvider) {
   });
 }
 
-export async function write(
+async function prepareTransaction(
   address: string,
   provider: WalletProvider,
   functionName: string,
@@ -399,9 +401,9 @@ export async function write(
   } catch {
     fees = await retryTransientRpc(() => client.estimateTransactionFees(feeOptions));
   }
-  let hash;
-  try {
-    hash = await client.writeContract({
+  return {
+    quote: { method: functionName, valueWei: String(value), feeWei: String(fees.feeValue), totalWei: String(value + BigInt(fees.feeValue)), recipients: uniqueRecipients },
+    send: async () => String(await client.writeContract({
       address: CONTRACT_ADDRESS as `0x${string}`,
       functionName,
       args,
@@ -411,38 +413,79 @@ export async function write(
         messageAllocations: fees.messageAllocations,
         feeValue: fees.feeValue,
       },
-    });
-  } catch (cause) {
-    throw new Error(rpcErrorMessage(cause));
-  }
-  let receipt;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    try {
-      receipt = await client.waitForTransactionReceipt({
-        hash,
-        waitUntil: "finalized",
-        interval: 3000,
-        retries: 240,
-        fullTransaction: true,
+    })),
+  };
+}
+
+function transactionEnvironment(address: string) {
+  return {
+    storage: window.localStorage,
+    scope: { chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, wallet: address },
+    changed: () => window.dispatchEvent(new Event("recourse-transaction")),
+    lock: async <Result>(key: string, operation: () => Promise<Result>): Promise<Result> => {
+      if (!navigator.locks) throw new Error("This browser needs Web Locks support for safe transaction recovery.");
+      return navigator.locks.request(key, { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error("Another tab is handling this wallet's transaction. Wait for it to finish.");
+        return operation();
       });
-      break;
-    } catch (cause) {
-      lastError = cause;
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (!isTransientRpcError(message) || attempt === 3) {
-        throw new Error(rpcErrorMessage(cause));
-      }
-      await sleep(1500 * (attempt + 1));
-    }
+    },
+  };
+}
+
+export function pendingTransaction(address: string) {
+  const environment = transactionEnvironment(address);
+  return readPendingTransaction(environment.storage, environment.scope);
+}
+
+async function confirmTransaction(record: PendingTransaction) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const receipt = await getReader().getTransaction({ hash: record.hash as TransactionHash });
+    const outcome = transactionOutcome({
+      sender: receipt.sender ?? receipt.from_address, recipient: receipt.recipient ?? receipt.to_address,
+      hash: receipt.hash ?? receipt.txId,
+      statusName: receipt.statusName ?? transactionsStatusNumberToName[String(receipt.status) as keyof typeof transactionsStatusNumberToName] ?? String(receipt.status),
+      successful: isSuccessful(receipt),
+    }, record);
+    if (outcome !== null) return outcome;
+    if (attempt < 5) await sleep(1500);
   }
-  if (!receipt) throw new Error(rpcErrorMessage(lastError));
-  if (!isSuccessful(receipt)) {
-    const result = String(receipt.txExecutionResultName ?? "unknown");
-    throw new Error(`Transaction finalized with execution result ${result}.`);
-  }
+  throw new Error("Transaction finality is still pending.");
+}
+
+export async function resumeTransaction(address: string) {
+  const hash = await resumeTrackedTransaction(transactionEnvironment(address), confirmTransaction);
   clearReadCache();
-  return String(hash);
+  return hash;
+}
+
+export async function clearUnbroadcastTransaction(address: string, id: string, confirmedNotBroadcast: boolean) {
+  await acknowledgeUnbroadcastTransaction(transactionEnvironment(address), id, confirmedNotBroadcast);
+}
+
+export async function write(
+  address: string,
+  provider: WalletProvider,
+  functionName: string,
+  args: CalldataEncodable[] = [],
+  value = 0n,
+  messageRecipients: string[] = [],
+  approve?: (quote: FeeQuote) => Promise<boolean>,
+) {
+  if (!approve) throw new Error("Explicit fee approval is required before sending a transaction.");
+  const hash = await submitTrackedTransaction(transactionEnvironment(address),
+    () => prepareTransaction(address, provider, functionName, args, value, messageRecipients),
+    async (quote) => {
+      if (!await approve(quote)) return false;
+      const [chainId, accounts] = await Promise.all([
+        provider.request({ method: "eth_chainId" }), provider.request({ method: "eth_accounts" }),
+      ]);
+      if (Number(chainId) !== CHAIN_ID || !Array.isArray(accounts) || String(accounts[0]).toLowerCase() !== address.toLowerCase()) {
+        throw new Error("Wallet or chain changed during approval. Review the transaction again.");
+      }
+      return true;
+    }, confirmTransaction);
+  clearReadCache();
+  return hash;
 }
 
 export async function connectWallet(provider: WalletProvider) {

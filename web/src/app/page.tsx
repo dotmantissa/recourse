@@ -56,14 +56,19 @@ import {
   readJobs,
   readReputation,
   signReceipt,
-  write,
+  write as submitChainWrite,
+  pendingTransaction,
+  resumeTransaction,
+  clearUnbroadcastTransaction,
   type AppState,
+  type CalldataEncodable,
   type WalletProvider,
 } from "@/lib/genlayer";
 import type { Capability, CapabilityRequest, Job, JobResult, Reputation } from "@/lib/types";
 import { clearPendingRequest, clearSessionInputs, loadRequestContext, recoverPendingRequestContexts, savePendingRequest, saveRequestContext } from "@/lib/request-store";
 import { validateRegistrationEndpoint } from "@/lib/provider";
 import { canDispute, recoveryReady } from "@/lib/lifecycle";
+import type { FeeQuote, PendingTransaction } from "@/lib/transactions";
 
 type View = "console" | "guide" | "dashboard";
 type Lens = "all" | "buyer" | "provider" | "disputes";
@@ -667,6 +672,10 @@ function PrivyHomeSession() {
   const [reputation, setReputation] = useState<Reputation | null>(null);
   const [balance, setBalance] = useState(0n);
   const [busy, setBusy] = useState("");
+  const [feeQuote, setFeeQuote] = useState<(FeeQuote & { wallet: string }) | null>(null);
+  const feeApproval = useRef<((approved: boolean) => void) | null>(null);
+  const [transactionState, setTransactionState] = useState<{ wallet: string; pending: PendingTransaction | null; error: string }>({ wallet: "", pending: null, error: "" });
+  const [unbroadcastConfirmation, setUnbroadcastConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [modal, setModal] = useState<Modal>("none");
@@ -698,10 +707,31 @@ function PrivyHomeSession() {
 
   const embeddedWallet = wallets.find((wallet) => wallet.walletClientType === "privy") ?? wallets[0];
   const address = embeddedWallet?.address ?? "";
+  const pending = transactionState.wallet === address ? transactionState.pending : null;
   const refreshInFlight = useRef<Promise<void> | null>(null);
   const historyExpanded = useRef(false);
 
   useEffect(() => () => { if (address) clearSessionInputs(address); }, [address]);
+
+  useEffect(() => {
+    const update = () => {
+      try {
+        setTransactionState({ wallet: address, pending: address ? pendingTransaction(address) : null, error: "" });
+      } catch (cause) {
+        setTransactionState({ wallet: address, pending: null, error: cause instanceof Error ? cause.message : "Pending transaction storage is unavailable." });
+      }
+    };
+    const initial = window.setTimeout(update, 0);
+    window.addEventListener("storage", update);
+    window.addEventListener("recourse-transaction", update);
+    return () => {
+      window.clearTimeout(initial);
+      window.removeEventListener("storage", update);
+      window.removeEventListener("recourse-transaction", update);
+      feeApproval.current?.(false);
+      feeApproval.current = null;
+    };
+  }, [address]);
 
   const refresh = useCallback(async () => {
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -783,6 +813,50 @@ function PrivyHomeSession() {
     await embeddedWallet.switchChain(CHAIN_ID);
     const provider = await embeddedWallet.getEthereumProvider();
     return { address: embeddedWallet.address, provider };
+  }
+
+  async function write(wallet: string, provider: WalletProvider, method: string, args: CalldataEncodable[] = [], value = 0n, recipients: string[] = []) {
+    const approval: { resolve?: (approved: boolean) => void; timer?: ReturnType<typeof setTimeout> } = {};
+    try {
+      return await submitChainWrite(wallet, provider, method, args, value, recipients, (quote) => {
+        if (feeApproval.current) throw new Error("Another fee approval is already open.");
+        setModal("none");
+        setFeeQuote({ ...quote, wallet });
+        return new Promise<boolean>((resolve) => {
+          approval.resolve = resolve;
+          feeApproval.current = resolve;
+          approval.timer = setTimeout(() => resolve(false), 120_000);
+        });
+      });
+    } finally {
+      if (approval.timer) clearTimeout(approval.timer);
+      if (approval.resolve && feeApproval.current === approval.resolve) {
+        feeApproval.current = null;
+        setFeeQuote(null);
+        approval.resolve(false);
+      }
+    }
+  }
+
+  function answerFeeApproval(approved: boolean) {
+    feeApproval.current?.(approved);
+    feeApproval.current = null;
+    setFeeQuote(null);
+  }
+
+  async function clearUnbroadcastIntent() {
+    if (!pending) return;
+    setBusy("clear-intent");
+    setError("");
+    try {
+      await clearUnbroadcastTransaction(address, pending.id, unbroadcastConfirmation === pending.id);
+      setUnbroadcastConfirmation("");
+      setNotice("Unbroadcast intent cleared by your confirmation. No transaction was sent or cancelled.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The intent could not be cleared.");
+    } finally {
+      setBusy("");
+    }
   }
 
   async function action(
@@ -1124,6 +1198,33 @@ function PrivyHomeSession() {
         </div>
       </header>
 
+      {notice && <div className="notice notice-success" role="status"><Check size={16} /> {notice}</div>}
+      {error && <div className="notice notice-error" role="alert"><CircleAlert size={16} /> {error}</div>}
+
+      {transactionState.wallet === address && transactionState.error && <div className="hash-note" role="alert">{transactionState.error}</div>}
+      {pending && <section className="hash-note" aria-label="Pending transaction">
+        <strong>{statusLabel(pending.method)} · {pending.hash ? "awaiting reconciliation" : "wallet outcome unknown"}</strong>
+        <p>Value: {formatGen(pending.valueWei)}. Approved protocol fee budget: {formatGen(pending.feeWei)}. New writes from this wallet are blocked until this record is reconciled.</p>
+        {pending.hash ? <>
+          <p style={{ overflowWrap: "anywhere" }}><code>{pending.hash}</code></p>
+          <button className="button button-line" disabled={Boolean(busy)} onClick={() => void action("resume-transaction", () => resumeTransaction(address))}>{busy === "resume-transaction" ? "Checking finality…" : "Check finality (no new transaction)"}</button>
+        </> : <>
+          <p>The app may have closed before saving a broadcast transaction ID. Check wallet and explorer history. Do not clear this record if a transaction was broadcast or its outcome is uncertain.</p>
+          <label className="check-field"><input type="checkbox" checked={unbroadcastConfirmation === pending.id} onChange={(event) => setUnbroadcastConfirmation(event.target.checked ? pending.id : "")} /> I checked wallet history and confirmed this write was never broadcast.</label>
+          <button className="button button-line" disabled={Boolean(busy) || unbroadcastConfirmation !== pending.id} onClick={() => void clearUnbroadcastIntent()}>Clear verified unbroadcast intent</button>
+        </>}
+      </section>}
+      {feeQuote && feeQuote.wallet === address && <ModalShell eyebrow="Transaction cost approval" title="Review the fee budget" onClose={() => answerFeeApproval(false)}>
+        <div className="form">
+          <p>Action: <strong>{statusLabel(feeQuote.method)}</strong> · Wallet {shortAddress(feeQuote.wallet)}</p>
+          <p>Escrow or collateral value: <strong>{formatGen(feeQuote.valueWei)}</strong></p>
+          <p>Protocol fee budget: <strong>{formatGen(feeQuote.feeWei)}</strong></p>
+          <p>Combined value and protocol budget: <strong>{formatGen(feeQuote.totalWei)}</strong></p>
+          <p>{feeQuote.recipients.length} internal payout recipient(s) budgeted. Wallet/network costs may be additional. Failed execution can still incur fees; refunds do not reimburse those fees. Approval expires after two minutes.</p>
+          <div className="modal-actions"><button className="button button-line" onClick={() => answerFeeApproval(false)}>Cancel without submitting</button><button className="button button-acid" onClick={() => answerFeeApproval(true)}>Approve budget and open wallet</button></div>
+        </div>
+      </ModalShell>}
+
       {view === "guide" ? <Guide /> : view === "dashboard" ? (
         <BuyerDashboard
           authenticated={authenticated}
@@ -1175,8 +1276,6 @@ function PrivyHomeSession() {
             <div className="strip-status"><span className="pulse-dot" /> chain online</div>
           </div>
 
-          {notice && <div className="notice notice-success"><Check size={16} /> {notice}</div>}
-          {error && <div className="notice notice-error"><CircleAlert size={16} /> {error}</div>}
           {!CONTRACT_ADDRESS && <div className="notice notice-error"><CircleAlert size={16} /> Studio Next contract address is not configured.</div>}
 
           <section id="capabilities" className="section-block capability-zone">
