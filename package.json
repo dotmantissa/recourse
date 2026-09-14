@@ -14,7 +14,7 @@
     "typecheck": "npm --prefix web run typecheck",
     "build": "npm --prefix web run build",
     "lint": "npm run lint:contracts && npm --prefix web run lint",
-    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "verify": "npm run test:api && npm --prefix web test && npm run lint && npm run typecheck && npm run test && npm run build",
     "deploy:studio-next": "node deploy/deploy.mjs",
     "verify:studio-next": "node deploy/verify.mjs",
     "smoke:studio-dev": "node scripts/studio-dev-smoke.mjs",
@@ -23,12 +23,17 @@
     "register:agents": "node scripts/register-agents.mjs",
     "dev": "npm --prefix web run dev"
   },
+  "engines": {
+    "node": ">=20.18.1"
+  },
   "dependencies": {
     "@privy-io/node": "^0.34.0",
     "ajv": "^8.20.0",
     "dotenv": "^17.2.2",
     "genlayer-js": "2.0.0-rc.1",
     "ipaddr.js": "^2.2.0",
+    "json-bigint": "^1.0.0",
+    "undici": "^7.29.1",
     "viem": "^2.56.3"
   }
 }

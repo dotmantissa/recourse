@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { verifyMessage } from "viem";
+import { parseId, parseObject } from "../api/http-safety.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const [inputPath] = process.argv.slice(2);
 if (!inputPath) {
   throw new Error("Usage: node scripts/publish-evidence.mjs packet.json");
 }
-const packet = JSON.parse(await readFile(resolve(inputPath), "utf8"));
+const packet = parseObject(await readFile(resolve(inputPath), "utf8"));
+parseId(packet.job_id);
 const required = [
   "job_id",
   "request_hash",
@@ -65,6 +67,6 @@ const result = {
 };
 await mkdir(resolve(root, "evidence"), { recursive: true });
 const outputPath = resolve(root, "evidence", `${core.job_id}.json`);
-await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`);
+await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, { flag: "wx", mode: 0o600 });
 const baseUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 console.log(JSON.stringify({ outputPath, evidenceUrl: `${baseUrl}/evidence/${core.job_id}`, receiptHash }));

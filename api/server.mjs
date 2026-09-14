@@ -1,13 +1,16 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { lookup } from "node:dns/promises";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
-import ipaddr from "ipaddr.js";
+import JSONbig from "json-bigint";
+import "dotenv/config";
+import {
+  HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
+  parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
+} from "./http-safety.mjs";
 import {
   createClient,
   encodeInternalMessageFeeParams,
@@ -39,7 +42,6 @@ const RPC_URL = "https://studio-dev.genlayer.com/api";
 const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID || "";
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET || "";
-const MAX_BODY_BYTES = 100_000;
 const ALLOWED_STATUSES = new Set(["success", "timeout", "malformed"]);
 const AGENT_DEFINITIONS = {
   "research-sources": {
@@ -91,6 +93,21 @@ let chainClient = null;
 let privyClient = null;
 let githubWriteQueue = Promise.resolve();
 const jobExecutionLocks = new Map();
+const limitExecution = createWorkLimiter(8);
+const limitRequests = createWorkLimiter(64);
+const requestRates = new Map();
+const chainJson = JSONbig({ storeAsString: true, strict: true });
+
+function requestAllowed(request) {
+  const now = Date.now();
+  for (const [key, entry] of requestRates) if (entry.expires <= now) requestRates.delete(key);
+  const key = request.socket.remoteAddress || "unknown";
+  if (!requestRates.has(key) && requestRates.size >= 10000) return false;
+  const entry = requestRates.get(key) || { expires: now + 60000, count: 0 };
+  entry.count += 1;
+  requestRates.set(key, entry);
+  return entry.count <= 240;
+}
 
 function corsHeaders(request, isPublic = false) {
   const origin = request.headers.origin || "";
@@ -112,10 +129,12 @@ function corsHeaders(request, isPublic = false) {
 }
 
 function json(response, status, body, headers = {}) {
+  if (response.destroyed || response.writableEnded) return;
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
+    ...([408, 413].includes(status) ? { Connection: "close" } : {}),
     ...headers,
   });
   response.end(JSON.stringify(body));
@@ -141,9 +160,7 @@ function hashRequest(capabilityId, requestLabel, request, nonce) {
 }
 
 function resultPath(jobId) {
-  if (!/^[A-Za-z0-9._~-]{1,128}$/.test(jobId)) {
-    throw new Error("invalid job id");
-  }
+  parseId(jobId);
   return resolve(RESULT_DIR, `${jobId}.json`);
 }
 
@@ -191,28 +208,8 @@ function decryptResult(packet) {
   return JSON.parse(plaintext);
 }
 
-function readBody(request) {
-  return new Promise((resolveBody, reject) => {
-    const chunks = [];
-    let size = 0;
-    request.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload too large"));
-        request.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    request.on("end", () => resolveBody(Buffer.concat(chunks).toString("utf8")));
-    request.on("error", reject);
-  });
-}
-
 function packetPath(jobId) {
-  if (!/^[A-Za-z0-9._~-]{1,128}$/.test(jobId)) {
-    throw new Error("invalid job id");
-  }
+  parseId(jobId);
   return resolve(EVIDENCE_DIR, `${jobId}.json`);
 }
 
@@ -268,88 +265,12 @@ function assertString(value, field, minimum, maximum) {
   return text;
 }
 
-function assertHttpUrl(value, field) {
-  const text = assertString(value, field, 12, 2048);
-  const url = new URL(text);
-  if (!["http:", "https:"].includes(url.protocol)) throw new Error(`${field} must use http(s)`);
-  return url;
-}
-
 function decodeSegment(value) {
   try {
     return decodeURIComponent(value);
   } catch {
     return "";
   }
-}
-
-async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function privateIp(address) {
-  const normalized = String(address).toLowerCase();
-  if (!isIP(normalized)) return true;
-  try {
-    const parsed = ipaddr.parse(normalized);
-    const candidate = parsed.kind() === "ipv6" && parsed.isIPv4MappedAddress()
-      ? parsed.toIPv4Address()
-      : parsed;
-    return candidate.range() !== "unicast";
-  } catch {
-    return true;
-  }
-}
-
-async function assertPublicUrl(value, field) {
-  const url = assertHttpUrl(value, field);
-  if (url.username || url.password || url.hostname === "localhost" || url.hostname.endsWith(".localhost")
-    || url.hostname.endsWith(".local") || url.hostname.endsWith(".internal")) {
-    throw new Error(`${field} must resolve to a public host`);
-  }
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
-  if (!addresses.length || addresses.some((entry) => privateIp(entry.address))) {
-    throw new Error(`${field} must resolve to a public host`);
-  }
-  return url;
-}
-
-async function fetchPublicUrl(value, options = {}, timeoutMs = 8000, maxRedirects = 3) {
-  let current = typeof value === "string" ? value : value.toString();
-  for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
-    const url = await assertPublicUrl(current, "url");
-    const response = await fetchWithTimeout(url.toString(), { ...options, redirect: "manual" }, timeoutMs);
-    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-    const location = response.headers.get("location");
-    if (!location) throw new Error("public URL returned a redirect without a location");
-    if (redirect === maxRedirects) throw new Error("public URL exceeded redirect limit");
-    current = new URL(location, url).toString();
-  }
-  throw new Error("public URL could not be fetched");
-}
-
-async function readTextLimited(response, maxBytes) {
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw new Error("remote response exceeded size limit");
-    }
-    chunks.push(Buffer.from(value));
-  }
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 function stripMarkup(value) {
@@ -400,7 +321,7 @@ async function executeAgent(slug, payload) {
     if (!Array.isArray(payload.sources) || payload.sources.length < 1 || payload.sources.length > 10) {
       throw new Error("sources must contain 1-10 URLs");
     }
-    const sources = await Promise.all(payload.sources.map((value) => assertPublicUrl(value, "source")));
+    const sources = payload.sources.map((value) => publicUrl(value, "source"));
     const checks = await Promise.all(sources.map(async (url) => {
       try {
         const response = await fetchPublicUrl(url, { headers: { Accept: "text/html,application/xhtml+xml" } }, 6000);
@@ -463,7 +384,7 @@ async function executeAgent(slug, payload) {
   }
 
   if (slug === "page-brief") {
-    const url = await assertPublicUrl(payload.url, "url");
+    const url = publicUrl(payload.url, "url");
     const response = await fetchPublicUrl(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain" } }, 8000);
     if (!response.ok) throw new Error(`page returned ${response.status}`);
     const raw = await readTextLimited(response, 1_000_000);
@@ -520,7 +441,7 @@ function outputMatchesSchema(output, schemaText) {
 
 function parseEvidencePayload(payload) {
   const core = {
-    job_id: String(payload.job_id || ""),
+    job_id: parseId(payload.job_id),
     request_hash: assertString(payload.request_hash, "request_hash", 1, 128).toLowerCase(),
     output_hash: assertString(payload.output_hash, "output_hash", 1, 128).toLowerCase(),
     response_status: String(payload.response_status || "").trim(),
@@ -577,35 +498,33 @@ async function readPacket(jobId) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
-  if (!GITHUB_TOKEN) return null;
-  try {
-    const response = await githubRequest(
-      `/repos/${GITHUB_REPOSITORY}/contents/evidence/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
-    );
-    if (!response.ok) return null;
-    const body = await response.json();
-    return JSON.parse(Buffer.from(String(body.content || "").replace(/\n/g, ""), "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
+  return readGithubFile("evidence", jobId);
 }
 
 async function readGithubFile(directory, jobId) {
   if (!GITHUB_TOKEN) return null;
-  try {
-    const response = await githubRequest(
-      `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
-    );
-    if (!response.ok) return null;
-    const body = await response.json();
-    return JSON.parse(Buffer.from(String(body.content || "").replace(/\n/g, ""), "base64").toString("utf8"));
-  } catch {
+  const response = await githubRequest(
+    `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
+  );
+  return decodeGithubFileResponse(response);
+}
+
+async function decodeGithubFileResponse(response) {
+  if (response.status === 404) {
+    await response.body?.cancel();
     return null;
   }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new HttpError(503, "durable storage is temporarily unavailable");
+  }
+  const body = JSON.parse(await readTextLimited(response, 2_000_000));
+  if (body.encoding !== "base64" || typeof body.content !== "string") throw new Error("durable storage returned an invalid file");
+  return parseObject(Buffer.from(body.content.replace(/\n/g, ""), "base64").toString("utf8"));
 }
 
 async function githubRequest(path, options = {}) {
-  return fetch(`https://api.github.com${path}`, {
+  return fetchWithTimeout(`https://api.github.com${path}`, {
     ...options,
     headers: {
       Accept: "application/vnd.github+json",
@@ -620,11 +539,12 @@ async function ensureGithubEvidenceBranch() {
   const current = await githubRequest(
     `/repos/${GITHUB_REPOSITORY}/git/ref/heads/${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`,
   );
+  await current.body?.cancel();
   if (current.ok) return;
   if (current.status !== 404) throw new Error(`GitHub branch lookup returned ${current.status}`);
   const main = await githubRequest(`/repos/${GITHUB_REPOSITORY}/git/ref/heads/main`);
   if (!main.ok) throw new Error(`GitHub main branch lookup returned ${main.status}`);
-  const mainBody = await main.json();
+  const mainBody = JSON.parse(await readTextLimited(main, 100_000));
   const created = await githubRequest(`/repos/${GITHUB_REPOSITORY}/git/refs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -633,6 +553,7 @@ async function ensureGithubEvidenceBranch() {
       sha: mainBody.object.sha,
     }),
   });
+  await created.body?.cancel();
   if (!created.ok && created.status !== 422) {
     throw new Error(`GitHub evidence branch creation returned ${created.status}`);
   }
@@ -649,8 +570,11 @@ async function writeGithubFile(directory, jobId, packet, message) {
     const path = `/repos/${GITHUB_REPOSITORY}/contents/${directory}/${encodeURIComponent(jobId)}.json`;
     const existing = await githubRequest(`${path}?ref=${encodeURIComponent(GITHUB_EVIDENCE_BRANCH)}`);
     let sha;
-    if (existing.ok) sha = (await existing.json()).sha;
-    else if (existing.status !== 404) throw new Error(`GitHub evidence lookup returned ${existing.status}`);
+    if (existing.ok) sha = JSON.parse(await readTextLimited(existing, 2_000_000)).sha;
+    else {
+      await existing.body?.cancel();
+      if (existing.status !== 404) throw new Error(`GitHub evidence lookup returned ${existing.status}`);
+    }
     const response = await githubRequest(path, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -661,6 +585,7 @@ async function writeGithubFile(directory, jobId, packet, message) {
         ...(sha ? { sha } : {}),
       }),
     });
+    await response.body?.cancel();
     if (!response.ok) throw new Error(`GitHub evidence write returned ${response.status}`);
   });
   githubWriteQueue = operation.then(() => undefined, () => undefined);
@@ -774,10 +699,14 @@ async function readChainJson(functionName, args = []) {
   });
   if (!value) return null;
   try {
-    return JSON.parse(String(value));
+    return parseChainJson(String(value));
   } catch {
     throw new Error(`${functionName} returned invalid JSON`);
   }
+}
+
+function parseChainJson(value) {
+  return chainJson.parse(value);
 }
 
 function transferAllocations(recipients) {
@@ -869,10 +798,10 @@ async function matchingJob(slug, jobId, requestHash) {
 }
 
 async function completeAgentJobUnlocked(slug, payload, request) {
-  const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
+  const jobId = parseId(request.headers["x-recourse-job-id"]);
   const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
   const requestLabel = assertString(request.headers["x-recourse-request-label"], "x-recourse-request-label", 1, 240);
-  const capabilityId = assertString(request.headers["x-recourse-capability-id"], "x-recourse-capability-id", 1, 64);
+  const capabilityId = parseId(request.headers["x-recourse-capability-id"], "capability_id");
   const nonce = assertString(request.headers["x-recourse-request-nonce"], "x-recourse-request-nonce", 8, 128);
   const requestPayload = payload.request ?? null;
   if (String(payload.capability_id) !== capabilityId || String(payload.request_label).trim() !== requestLabel || String(payload.nonce).trim() !== nonce) {
@@ -960,24 +889,23 @@ async function completeAgentJobUnlocked(slug, payload, request) {
 }
 
 async function completeAgentJob(slug, payload, request) {
-  const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
-  const previous = jobExecutionLocks.get(jobId);
-  let release;
-  const turn = new Promise((resolveTurn) => { release = resolveTurn; });
-  jobExecutionLocks.set(jobId, turn);
-  try {
-    if (previous) await previous;
-    return await completeAgentJobUnlocked(slug, payload, request);
-  } finally {
-    release();
-    if (jobExecutionLocks.get(jobId) === turn) jobExecutionLocks.delete(jobId);
-  }
+  const jobId = parseId(request.headers["x-recourse-job-id"]);
+  if (jobExecutionLocks.has(jobId)) throw new HttpError(409, "job execution is already in progress; retry later");
+  return limitExecution(async () => {
+    jobExecutionLocks.set(jobId, true);
+    try {
+      return await completeAgentJobUnlocked(slug, payload, request);
+    } finally {
+      jobExecutionLocks.delete(jobId);
+    }
+  });
 }
 
-const server = createServer(async (request, response) => {
-  const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+async function handleRequest(request, response) {
+  const url = new URL(request.url || "/", "http://localhost");
   const publicCors = corsHeaders(request, true);
   const restrictedCors = corsHeaders(request);
+  if (!requestAllowed(request)) return json(response, 429, { error: "request rate limit exceeded" }, { ...publicCors, "Retry-After": "60" });
 
   if (request.method === "OPTIONS") {
     const publicPreflight = url.pathname === "/"
@@ -1017,6 +945,10 @@ const server = createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname === "/health") {
     try {
       await access(EVIDENCE_DIR, fsConstants.R_OK | fsConstants.W_OK);
+      await access(RESULT_DIR, fsConstants.R_OK | fsConstants.W_OK);
+      encryptionKey();
+      if (!agentAccount || !PUBLIC_BASE_URL || !GITHUB_TOKEN || !MONITOR_SECRET || !PRIVY_APP_ID || !PRIVY_APP_SECRET) throw new Error("required runtime configuration is missing");
+      publicUrl(PUBLIC_BASE_URL, "PUBLIC_BASE_URL");
       return json(
         response,
         200,
@@ -1034,7 +966,7 @@ const server = createServer(async (request, response) => {
         publicCors,
       );
     } catch {
-      return json(response, 503, { ok: false, storage: "unavailable" }, publicCors);
+      return json(response, 503, { ok: false, status: "not_ready" }, publicCors);
     }
   }
 
@@ -1059,7 +991,7 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname.startsWith("/agents/")) {
     const slug = decodeSegment(url.pathname.slice("/agents/".length));
-    const definition = AGENT_DEFINITIONS[slug];
+    const definition = Object.hasOwn(AGENT_DEFINITIONS, slug) ? AGENT_DEFINITIONS[slug] : null;
     return definition
       ? json(
           response,
@@ -1077,14 +1009,14 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "POST" && url.pathname.startsWith("/agents/") && url.pathname.endsWith("/execute")) {
     const slug = decodeSegment(url.pathname.slice("/agents/".length, -"/execute".length));
-    if (!AGENT_DEFINITIONS[slug]) {
+    if (!Object.hasOwn(AGENT_DEFINITIONS, slug)) {
       return json(response, 404, { error: "agent capability not found" }, publicCors);
     }
     if (!agentAccount) {
       return json(response, 503, { error: "agent signing is not configured" }, publicCors);
     }
     try {
-      const payload = JSON.parse(await readBody(request));
+      const payload = parseObject(await readBody(request));
       const result = await completeAgentJob(slug, payload, request);
       return json(response, 200, {
         agent: slug,
@@ -1095,7 +1027,7 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       return json(
         response,
-        /request|job|commitment|capability|configured/i.test(error?.message || "") ? 422 : 502,
+        error instanceof HttpError ? error.status : /request|job|commitment|capability|configured/i.test(error?.message || "") ? 422 : 502,
         { error: error instanceof Error ? error.message : "agent execution failed" },
         publicCors,
       );
@@ -1105,6 +1037,7 @@ const server = createServer(async (request, response) => {
   if (request.method === "GET" && url.pathname.startsWith("/results/")) {
     const jobId = decodeSegment(url.pathname.slice("/results/".length));
     try {
+      parseId(jobId);
       const claims = await authenticate(request);
       const job = await readChainJson("get_job", [jobId]);
       if (!job) return json(response, 404, { error: "job not found" }, restrictedCors);
@@ -1160,7 +1093,7 @@ const server = createServer(async (request, response) => {
       return json(response, 401, { error: "monitor authorization required" }, restrictedCors);
     }
     try {
-      const payload = JSON.parse(await readBody(request));
+      const payload = parseObject(await readBody(request));
       const core = parseEvidencePayload(payload);
       const receiptHash = createHash("sha256").update(canonicalJson(core)).digest("hex");
       const signature = String(payload.receipt_signature || "");
@@ -1214,7 +1147,7 @@ const server = createServer(async (request, response) => {
     } catch (error) {
       return json(
         response,
-        400,
+        error instanceof HttpError ? error.status : 400,
         { error: error instanceof Error ? error.message : "invalid JSON" },
         restrictedCors,
       );
@@ -1225,11 +1158,12 @@ const server = createServer(async (request, response) => {
     let body = {};
     try {
       const raw = await readBody(request);
-      if (raw.trim()) body = JSON.parse(raw);
-    } catch {
-      return json(response, 400, { error: "x402 request body must be valid JSON" }, publicCors);
+      if (raw.trim()) body = parseObject(raw);
+    } catch (error) {
+      return json(response, error instanceof HttpError ? error.status : 400, { error: error.message || "invalid request body" }, publicCors);
     }
-    const capabilityId = String(request.headers["x-recourse-capability-id"] || body.capability_id || "").trim();
+    const capabilityId = request.headers["x-recourse-capability-id"] ?? body.capability_id ?? "";
+    if (capabilityId !== "") parseId(capabilityId, "capability_id");
     const requirement = await paymentRequirement(capabilityId);
     if (!request.headers["x-payment"]) {
       const encoded = Buffer.from(JSON.stringify(requirement)).toString("base64");
@@ -1247,6 +1181,7 @@ const server = createServer(async (request, response) => {
         accepts: [requirement],
       }, publicCors);
     }
+    parseId(jobId);
     const paymentEnvelope = parsePaymentEnvelope(request.headers["x-payment"]);
     if (!paymentEnvelope) {
       return json(response, 422, {
@@ -1295,7 +1230,16 @@ const server = createServer(async (request, response) => {
   }
 
   return json(response, 404, { error: "not found" }, publicCors);
+}
+
+const server = createServer((request, response) => {
+  limitRequests(() => handleRequest(request, response)).catch((error) => {
+    if (!response.headersSent) json(response, error instanceof HttpError ? error.status : 500, { error: error instanceof HttpError ? error.message : "request could not be completed" }, corsHeaders(request, true));
+    else response.end();
+  });
 });
+server.requestTimeout = 30000;
+server.headersTimeout = 10000;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   server.listen(PORT, "0.0.0.0", () => {
@@ -1313,6 +1257,12 @@ process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
 export {
+  server,
+  fetchWithTimeout,
+  fetchPublicUrl,
+  parseObject,
+  parseChainJson,
+  decodeGithubFileResponse,
   assertPublicUrl,
   evidenceMatchesChain,
   hashRequest,

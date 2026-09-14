@@ -7,11 +7,33 @@ import {
   hashRequest,
   outputMatchesSchema,
   parsePaymentEnvelope,
+  parseChainJson,
+  decodeGithubFileResponse,
   paymentEnvelopeMatches,
   privateIp,
   readTextLimited,
   storedResultMatchesJob,
 } from "../../api/server.mjs";
+
+test("chain JSON preserves exact wei amounts and rejects duplicate fields", () => {
+  const value = parseChainJson('{"price_wei":2000000000000000001,"escrow_wei":2000000000000000000,"deadline":42}');
+  assert.equal(value.price_wei, "2000000000000000001");
+  assert.equal(value.escrow_wei, "2000000000000000000");
+  assert.notEqual(value.price_wei, value.escrow_wei);
+  assert.equal(value.deadline, 42);
+  assert.throws(() => parseChainJson('{"price_wei":1,"price_wei":2}'));
+});
+
+test("storage failures cannot masquerade as missing deliveries", async () => {
+  assert.equal(await decodeGithubFileResponse(new Response(null, { status: 404 })), null);
+  for (const status of [401, 403, 429, 500, 503]) {
+    await assert.rejects(decodeGithubFileResponse(new Response("failed", { status })), { status: 503 });
+  }
+  const content = Buffer.from('{"job_id":"1"}').toString("base64");
+  assert.deepEqual(await decodeGithubFileResponse(Response.json({ encoding: "base64", content })), { job_id: "1" });
+  await assert.rejects(decodeGithubFileResponse(Response.json({ content })), /invalid file/);
+  await assert.rejects(decodeGithubFileResponse(new Response("x".repeat(2_000_001))), /size limit/);
+});
 
 test("request commitments are stable across object key order", () => {
   const first = hashRequest("2", "Research", { query: "agents", depth: 2 }, "nonce-123");

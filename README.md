@@ -69,7 +69,7 @@ Objective evidence is normalized with `strict_eq`; semantic disputes use
 
 ## Local setup
 
-Use Python 3.10+ and Node 20+.
+Use Python 3.10+ and Node 20.18.1+ (required by the HTTP transport).
 
 ```bash
 python3 -m venv .venv
@@ -77,6 +77,39 @@ python3 -m venv .venv
 npm install
 npm --prefix web install
 ```
+
+### Adapter and RPC safety checks
+
+Run `npm run test:api` and `npm --prefix web test` for offline HTTP, egress,
+storage-error, and RPC regression coverage. Both are included in `npm run verify`.
+The RPC tests transpile the actual route using the installed TypeScript compiler;
+they do not contact Studio or require credentials.
+
+The adapter accepts JSON objects and canonical positive numeric ID strings (up to
+20 digits). Request bodies are capped at 100 KB with a 10-second read deadline.
+Public-page fetches validate every DNS answer and redirect, connect only to those
+validated addresses, allow ports 80/443, and bound the decompressed body to 1 MB.
+Their total timeout includes DNS, redirects, and body consumption.
+
+Per adapter process, at most 64 HTTP handlers, 8 job executions, and 16 public-page
+fetches run concurrently. Duplicate in-flight job execution returns `409`; exhausted
+capacity returns `503`; the socket-IP limit is 240 requests/minute (`429`). Behind a
+proxy, socket-IP limits may be shared by multiple users; forwarded client-IP headers
+are not trusted. These in-memory limits and locks are not distributed leases or
+restart-safe execution guarantees. Use deployment-level rate limits as well.
+
+The browser RPC proxy allows only the listed wallet/Studio methods, batches of at
+most 10, 256 KB requests, and 4 MB responses. Each instance allows 32 concurrent
+requests and 120 requests/minute per Vercel-supplied client IP (a shared fallback
+outside Vercel). Body reads and upstream responses have 10/25-second deadlines.
+
+`GET /` is liveness; `GET /health` returns `503` unless local storage is readable
+and writable and signing, public URL, monitor, Privy, GitHub, and result-encryption
+configuration are present. This checks local readiness, not remote credential
+validity or chain availability. Storage read errors fail closed instead of being
+treated as absent results. Evidence CLI writes reject path-like IDs and never
+overwrite an existing evidence file. Contract lifecycle, committed-output
+adjudication, and durable worker recovery remain separate audit work.
 
 Copy `.env.example` to `.env` and keep the deployment key outside Git.
 
