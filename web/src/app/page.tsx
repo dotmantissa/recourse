@@ -48,8 +48,11 @@ import {
   clearReadCache,
   executeFundedCapability,
   fetchJobResult,
+  fundStudioAccount,
   hashRequest,
+  readBalance,
   readJob,
+  readJobs,
   readReputation,
   signReceipt,
   write,
@@ -92,8 +95,55 @@ function requestStorageKey(jobId: string) {
   return `recourse:request:${jobId}`;
 }
 
+function pendingRequestStorageKey(requestHash: string) {
+  return `recourse:pending:${requestHash}`;
+}
+
 function saveRequestContext(jobId: string, request: CapabilityRequest | null, nonce: string) {
   window.localStorage.setItem(requestStorageKey(jobId), JSON.stringify({ request, nonce }));
+}
+
+function savePendingRequest(
+  requestHash: string,
+  value: {
+    buyer: string;
+    capabilityId: string;
+    requestLabel: string;
+    request: CapabilityRequest | null;
+    nonce: string;
+  },
+) {
+  window.localStorage.setItem(
+    pendingRequestStorageKey(requestHash),
+    JSON.stringify({ ...value, createdAt: Date.now() }),
+  );
+}
+
+function clearPendingRequest(requestHash: string) {
+  window.localStorage.removeItem(pendingRequestStorageKey(requestHash));
+}
+
+function recoverPendingRequestContexts(jobs: Job[]) {
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (!key?.startsWith("recourse:pending:")) continue;
+    try {
+      const pending = JSON.parse(window.localStorage.getItem(key) || "null");
+      if (Date.now() - Number(pending?.createdAt || 0) > 86_400_000) {
+        window.localStorage.removeItem(key);
+        index -= 1;
+        continue;
+      }
+      const job = jobs.find((item) =>
+        item.request_hash.toLowerCase() === key.slice("recourse:pending:".length).toLowerCase()
+        && item.buyer.toLowerCase() === String(pending?.buyer || "").toLowerCase(),
+      );
+      if (!job || typeof pending?.nonce !== "string") continue;
+      saveRequestContext(job.job_id, pending.request ?? null, pending.nonce);
+      clearPendingRequest(job.request_hash);
+      index -= 1;
+    } catch {}
+  }
 }
 
 function loadRequestContext(jobId: string): { request: CapabilityRequest | null; nonce: string } | null {
@@ -249,6 +299,10 @@ function CapabilitySpecimen({
       </div>
       <p className="specimen-provider"><span className="provider-dot" /> {shortAddress(capability.provider)} <span>publishes</span> {capability.endpoint}</p>
       <p className="specimen-terms">{capability.terms}</p>
+      <details className="specimen-schema">
+        <summary>Required output schema</summary>
+        <pre><code>{capability.output_schema}</code></pre>
+      </details>
       <div className="specimen-data">
         <div><span>response window</span><strong>{capability.deadline_seconds}s</strong></div>
         <div><span>timeout recourse</span><strong>{bps(capability.timeout_refund_bps)}</strong></div>
@@ -287,7 +341,12 @@ function JobLedgerRow({
   const isBuyer = job.buyer.toLowerCase() === address.toLowerCase();
   const isProvider = job.provider.toLowerCase() === address.toLowerCase();
   const isMonitor = Boolean(monitorAddress) && monitorAddress.toLowerCase() === address.toLowerCase();
-  const settlementReady = Number(job.deadline_at) * 1000 <= now;
+  const settlementAt = isBuyer
+    ? Number(job.deadline_at)
+    : Math.max(Number(job.deadline_at), Number(job.challenge_deadline_at || 0));
+  const settlementReady = settlementAt * 1000 <= now;
+  const timeoutReady = settlementReady;
+  const hasEvidence = Boolean(job.evidence_id);
   return (
     <article className="ledger-row">
       <div className="ledger-number">0{job.job_id}</div>
@@ -300,9 +359,10 @@ function JobLedgerRow({
       <div className="ledger-actions">
         {isProvider && job.status === "funded" && <button className="icon-button" title="Submit provider receipt" aria-label="Submit provider receipt" onClick={() => onAction("receipt", job)}><FileCheck2 size={16} /></button>}
         {isMonitor && job.status === "receipt_submitted" && <button className="icon-button" title="Publish evidence packet" aria-label="Publish evidence packet" onClick={() => onAction("evidence", job)}><ScanLine size={16} /></button>}
-        {isBuyer && job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
-        {isBuyer && job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
-        {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!settlementReady} title={settlementReady ? "Settle this escrow" : `Available after ${formatDate(job.deadline_at)}`} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {settlementReady ? "Settle" : "Settle after deadline"}</button>}
+        {isBuyer && job.status === "funded" && <button className="button button-line small" disabled={!timeoutReady} title={timeoutReady ? "Claim the configured timeout refund" : `Available after ${formatDate(job.deadline_at)}`} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> {timeoutReady ? "Claim timeout" : "Claim after deadline"}</button>}
+        {isBuyer && job.status === "receipt_submitted" && <button className="button button-line small" disabled={!hasEvidence} title={hasEvidence ? "Open a quality or terms dispute" : "The public evidence packet must be published first"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> {hasEvidence ? "Dispute" : "Waiting for evidence"}</button>}
+        {job.status === "disputed" && <button className="button button-acid small" onClick={() => onAction("resolve", job)}><Gavel size={14} /> Resolve with validators</button>}
+        {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!settlementReady || !hasEvidence} title={!hasEvidence ? "The public evidence packet must be published first" : settlementReady ? "Settle this escrow" : `Available after ${formatDate(settlementAt)}`} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {!hasEvidence ? "Waiting for evidence" : settlementReady ? "Settle" : "Settlement pending"}</button>}
         {job.status === "settled" && <span className={`outcome ${statusTone(job.outcome)}`}>{statusLabel(job.outcome)} · {bps(job.refund_bps)} back</span>}
       </div>
     </article>
@@ -395,6 +455,56 @@ function Guide() {
           <li><strong>Resolve.</strong> Settle after the response deadline when the evidence meets the terms. If the provider times out, claim the configured timeout refund. If quality or terms are disputed, open recourse and GenLayer resolves the semantic claim.</li>
         </ol>
       </div>
+      <div className="agent-integration">
+        <div>
+          <span className="eyebrow">Bring your own agent</span>
+          <h2>Your agent can be the buyer.</h2>
+          <p>Privy powers the human-facing embedded wallet in this app. A server-side or autonomous buyer should use its own encrypted EOA or managed signer, call the same Studio Next contract, and keep its private key out of the browser. The adapter response contains the result directly; the dashboard reveal route is for authenticated browser retrieval and recovery.</p>
+        </div>
+        <pre><code>{`// 1. Read capabilities and choose one
+const capability = capabilities.find((item) => item.status === "active");
+
+// 2. Commit the exact request before sending it.
+// hashRequest is SHA-256 over sorted-key JSON containing these five fields.
+const nonce = crypto.randomUUID();
+const request = { query: "verifiable credentials" };
+const requestHash = await hashRequest(
+  capability.capability_id,
+  "Agent research request",
+  request,
+  nonce
+); // returns sha256:<hex>
+
+// 3. Sign create_job with capability.price_wei as native GEN
+await genlayer.writeContract({
+  functionName: "create_job",
+  args: [capability.capability_id, requestHash, "Agent research request"],
+  value: BigInt(capability.price_wei)
+});
+
+// 4. Execute only after the funded job is readable
+const response = await fetch(capability.endpoint, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "x-recourse-job-id": job.job_id,
+    "x-recourse-request-hash": requestHash,
+    "x-recourse-request-label": "Agent research request",
+    "x-recourse-capability-id": capability.capability_id,
+    "x-recourse-request-nonce": nonce
+  },
+  body: JSON.stringify({
+    capability_id: capability.capability_id,
+    request_label: "Agent research request",
+    nonce,
+    request
+  })
+});
+if (!response.ok) throw new Error(await response.text());
+const delivery = await response.json();
+// delivery.output, delivery.receipt, delivery.evidence_url, transaction hashes
+// A retry with the same job, request, and nonce returns the stored delivery.`}</code></pre>
+      </div>
       <div className="guide-footer-callout">
         <div className="stamp"><KeyRound size={18} /> no blind payment</div>
         <p>Recourse is not a marketplace and it is not an uptime dashboard. It is the request-level contract that gives agents a credible reason to transact.</p>
@@ -407,28 +517,34 @@ function Guide() {
 function BuyerDashboard({
   authenticated,
   address,
+  balance,
   jobs,
   capabilities,
   evidence,
   results,
   resultBusy,
   executeBusy,
+  faucetBusy,
   now,
   onConnect,
+  onFund,
   onResult,
   onExecute,
   onAction,
 }: {
   authenticated: boolean;
   address: string;
+  balance: bigint;
   jobs: Job[];
   capabilities: Capability[];
   evidence: AppState["evidence"];
   results: Record<string, JobResult | null>;
   resultBusy: string;
   executeBusy: string;
+  faucetBusy: boolean;
   now: number;
   onConnect: () => void;
+  onFund: () => void;
   onResult: (job: Job) => void;
   onExecute: (job: Job) => void;
   onAction: (action: string, job: Job) => void;
@@ -469,7 +585,7 @@ function BuyerDashboard({
         </div>
         <p>Results arrive here after the funded capability runs. The request hash is your portable receipt identity; the evidence link is what GenLayer validators inspect.</p>
       </div>
-      <div className="dashboard-address"><WalletCards size={15} /><span className="mono">{address}</span><span>Studio Next / {CHAIN_ID}</span></div>
+      <div className="dashboard-address"><WalletCards size={15} /><span className="mono dashboard-wallet">{address}</span><strong className="dashboard-balance">{formatGen(balance)}</strong><span className="dashboard-network">Studio Next / {CHAIN_ID}</span><button className="button button-line small" onClick={onFund} disabled={faucetBusy}>{faucetBusy ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />} {faucetBusy ? "Funding" : "Get test GEN"}</button></div>
       <div className="dashboard-filters">
         <label className="search-field"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your request history" aria-label="Search your request history" /></label>
         <div className="status-filters">
@@ -503,9 +619,10 @@ function BuyerDashboard({
                 </div>
                 <div className="dashboard-actions">
                   {job.status === "funded" && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
-                  {job.status === "funded" && <button className="button button-line small" onClick={() => onAction("timeout", job)}><Clock3 size={14} /> Claim timeout</button>}
-                  {job.status === "receipt_submitted" && <button className="button button-line small" onClick={() => onAction("dispute", job)}><Gavel size={14} /> Dispute</button>}
-                  {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={Number(job.deadline_at) * 1000 > now} title={Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Settle this escrow"} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {Number(job.deadline_at) * 1000 > now ? "Settle after deadline" : "Settle"}</button>}
+                  {job.status === "funded" && <button className="button button-line small" disabled={Number(job.deadline_at) * 1000 > now} title={Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Claim the configured timeout refund"} onClick={() => onAction("timeout", job)}><Clock3 size={14} /> {Number(job.deadline_at) * 1000 > now ? "Claim after deadline" : "Claim timeout"}</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-line small" disabled={!job.evidence_id} title={job.evidence_id ? "Open a quality or terms dispute" : "The public evidence packet must be published first"} onClick={() => onAction("dispute", job)}><Gavel size={14} /> {job.evidence_id ? "Dispute" : "Waiting for evidence"}</button>}
+                  {job.status === "disputed" && <button className="button button-acid small" onClick={() => onAction("resolve", job)}><Gavel size={14} /> Resolve with validators</button>}
+                  {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!job.evidence_id || Number(job.deadline_at) * 1000 > now} title={!job.evidence_id ? "The public evidence packet must be published first" : Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Settle this escrow"} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {!job.evidence_id ? "Waiting for evidence" : Number(job.deadline_at) * 1000 > now ? "Settle after deadline" : "Settle"}</button>}
                 </div>
               </div>
               {result && (
@@ -565,6 +682,7 @@ function PrivyHome() {
   const [lens, setLens] = useState<Lens>("all");
   const [state, setState] = useState<AppState>(emptyState);
   const [reputation, setReputation] = useState<Reputation | null>(null);
+  const [balance, setBalance] = useState(0n);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -579,10 +697,10 @@ function PrivyHome() {
   const [capabilityPage, setCapabilityPage] = useState(0);
   const [registerForm, setRegisterForm] = useState({
     name: "Verified source research",
-    endpoint: "https://api.example.com/research",
+    endpoint: ADAPTER_URL ? `${ADAPTER_URL}/agents/research-sources/execute` : "",
     terms: "Return five verified sources in JSON. Every item must include title, URL, and citation.",
     deadline: "30",
-    schema: '{"type":"array","items":{"type":"object","required":["title","url","citation"]}}',
+    schema: '{"type":"object","required":["query","sources"],"properties":{"query":{"type":"string"},"sources":{"type":"array","minItems":5,"maxItems":5}}}',
     timeout: "100",
     malformed: "75",
     price: "2",
@@ -603,8 +721,19 @@ function PrivyHome() {
       setError("");
       try {
         const next = await loadState();
+        recoverPendingRequestContexts(next.jobs);
         setState(next);
-        if (address) setReputation(await readReputation(address));
+        if (address) {
+          const [nextReputation, nextBalance] = await Promise.all([
+            readReputation(address),
+            readBalance(address),
+          ]);
+          setReputation(nextReputation);
+          setBalance(nextBalance);
+        } else {
+          setReputation(null);
+          setBalance(0n);
+        }
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "The Studio Next state could not be loaded.");
       }
@@ -667,7 +796,11 @@ function PrivyHome() {
     return { address: embeddedWallet.address, provider };
   }
 
-  async function action(label: string, fn: () => Promise<string>): Promise<string | null> {
+  async function action(
+    label: string,
+    fn: () => Promise<string>,
+    refreshAfter = true,
+  ): Promise<string | null> {
     setBusy(label);
     setError("");
     setNotice("");
@@ -675,7 +808,7 @@ function PrivyHome() {
       const hash = await fn();
       setNotice(`Finalized ${hash.slice(0, 12)}...`);
       setModal("none");
-      await refresh();
+      if (refreshAfter) await refresh();
       return hash;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The transaction failed.");
@@ -687,9 +820,11 @@ function PrivyHome() {
 
   async function waitForJobStatus(jobId: string, expectedStatus: Job["status"]) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      clearReadCache();
-      const latest = await readJob(jobId);
-      if (latest?.status === expectedStatus) return latest;
+      try {
+        clearReadCache();
+        const latest = await readJob(jobId);
+        if (latest?.status === expectedStatus) return latest;
+      } catch {}
       await new Promise((resolve) => window.setTimeout(resolve, 1800));
     }
     return null;
@@ -710,6 +845,23 @@ function PrivyHome() {
     }
   }
 
+  async function fundWallet() {
+    setBusy("faucet");
+    setError("");
+    setNotice("");
+    try {
+      const context = await walletContext();
+      await fundStudioAccount(context.address);
+      const nextBalance = await readBalance(context.address);
+      setBalance(nextBalance);
+      setNotice(`Studio Next faucet funded ${shortAddress(context.address)}. Balance: ${formatGen(nextBalance)}.`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The Studio Next faucet request failed.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function register(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const context = await walletContext();
@@ -718,8 +870,9 @@ function PrivyHome() {
 
   async function findJob(requestHash: string, buyer: string) {
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const snapshot = await loadState();
-      const job = snapshot.jobs.find((item) => item.request_hash.toLowerCase() === requestHash.toLowerCase() && item.buyer.toLowerCase() === buyer.toLowerCase());
+      clearReadCache();
+      const jobs = await readJobs();
+      const job = jobs.find((item) => item.request_hash.toLowerCase() === requestHash.toLowerCase() && item.buyer.toLowerCase() === buyer.toLowerCase());
       if (job) return job;
       await new Promise((resolve) => window.setTimeout(resolve, 1800));
     }
@@ -732,17 +885,26 @@ function PrivyHome() {
     setBusy("job");
     setError("");
     setNotice("");
+    let pendingHash = "";
     try {
       const context = await walletContext();
       const request = requestPayload(selectedCapability, jobForm);
       const nonce = crypto.randomUUID();
-      const requestHash = await hashRequest(selectedCapability.capability_id, jobForm.label, request, nonce);
-      await write(context.address, context.provider, "create_job", [selectedCapability.capability_id, requestHash, jobForm.label], asWei(selectedCapability.price_wei));
+      pendingHash = await hashRequest(selectedCapability.capability_id, jobForm.label, request, nonce);
+      savePendingRequest(pendingHash, {
+        buyer: context.address,
+        capabilityId: selectedCapability.capability_id,
+        requestLabel: jobForm.label,
+        request,
+        nonce,
+      });
+      await write(context.address, context.provider, "create_job", [selectedCapability.capability_id, pendingHash, jobForm.label], asWei(selectedCapability.price_wei));
       setView("dashboard");
       setModal("none");
       setNotice("Escrow funded. Locating the onchain job and starting the capability...");
-      const job = await findJob(requestHash, context.address);
+      const job = await findJob(pendingHash, context.address);
       saveRequestContext(job.job_id, request, nonce);
+      clearPendingRequest(pendingHash);
       try {
         const result = await executeFundedCapability(selectedCapability, job, request, nonce);
         setResults((current) => ({ ...current, [job.job_id]: result }));
@@ -837,28 +999,57 @@ function PrivyHome() {
   }
 
   async function runJobAction(actionName: string, job: Job) {
-    if (["receipt", "evidence", "dispute"].includes(actionName)) {
-      setSelectedJob(job);
-      setModal(actionName as Modal);
-      return;
-    }
-    const context = await walletContext();
-    if (actionName === "timeout") await action(`timeout-${job.job_id}`, () => write(context.address, context.provider, "claim_timeout", [job.job_id], 0n, [job.buyer]));
-    if (actionName === "settle") {
-      if (Number(job.deadline_at) * 1000 > Date.now()) {
-        setError(`Settlement opens after the response deadline: ${formatDate(job.deadline_at)}.`);
+    try {
+      if (["receipt", "evidence", "dispute"].includes(actionName)) {
+        setSelectedJob(job);
+        if (actionName === "evidence" && ADAPTER_URL) {
+          setEvidenceForm({ url: `${ADAPTER_URL}/evidence/${job.job_id}` });
+        }
+        setModal(actionName as Modal);
         return;
       }
-      const hash = await action(`settle-${job.job_id}`, () => write(context.address, context.provider, "settle_job", [job.job_id], 0n, [job.buyer, job.provider]));
-      if (!hash) return;
-      const latest = await waitForJobStatus(job.job_id, "settled");
-      if (latest) {
-        setState((current) => ({ ...current, jobs: current.jobs.map((item) => item.job_id === latest.job_id ? latest : item) }));
-        setNotice(`Job ${job.job_id} is settled. The escrow outcome is now recorded onchain.`);
-      } else {
-        setNotice(`Settlement transaction finalized for Job ${job.job_id}. Studio Next is still indexing the updated escrow state.`);
+      const context = await walletContext();
+      if (actionName === "timeout") {
+        if (Number(job.deadline_at) * 1000 > Date.now()) {
+          setError(`Timeout recourse opens after the response deadline: ${formatDate(job.deadline_at)}.`);
+          return;
+        }
+        await action(`timeout-${job.job_id}`, () => write(context.address, context.provider, "claim_timeout", [job.job_id], 0n, [job.buyer]));
       }
-      await refresh();
+      if (actionName === "settle") {
+        if (Number(job.deadline_at) * 1000 > Date.now()) {
+          setError(`Settlement opens after the response deadline: ${formatDate(job.deadline_at)}.`);
+          return;
+        }
+        const hash = await action(`settle-${job.job_id}`, () => write(context.address, context.provider, "settle_job", [job.job_id], 0n, [job.buyer, job.provider]), false);
+        if (!hash) return;
+        const latest = await waitForJobStatus(job.job_id, "settled");
+        if (latest) {
+          setState((current) => ({ ...current, jobs: current.jobs.map((item) => item.job_id === latest.job_id ? latest : item) }));
+          setNotice(`Job ${job.job_id} is settled. The escrow outcome is now recorded onchain.`);
+        } else {
+          setNotice(`Settlement transaction finalized for Job ${job.job_id}. Studio Next is still indexing the updated escrow state.`);
+        }
+        await refresh();
+      }
+      if (actionName === "resolve") {
+        if (!job.dispute_id) {
+          setError(`Job ${job.job_id} has no dispute record to resolve.`);
+          return;
+        }
+        const hash = await action(`resolve-${job.job_id}`, () => write(context.address, context.provider, "resolve_dispute", [job.dispute_id], 0n, [job.buyer, job.provider]), false);
+        if (!hash) return;
+        const latest = await waitForJobStatus(job.job_id, "settled");
+        if (latest) {
+          setState((current) => ({ ...current, jobs: current.jobs.map((item) => item.job_id === latest.job_id ? latest : item) }));
+          setNotice(`Dispute for Job ${job.job_id} resolved. The validator-backed outcome is recorded onchain.`);
+        } else {
+          setNotice(`Dispute resolution finalized for Job ${job.job_id}. Studio Next is still indexing the updated escrow state.`);
+        }
+        await refresh();
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The escrow action could not be completed.");
     }
   }
 
@@ -892,13 +1083,16 @@ function PrivyHome() {
         <BuyerDashboard
           authenticated={authenticated}
           address={address}
+          balance={balance}
           jobs={state.jobs}
           capabilities={state.capabilities}
           evidence={state.evidence}
           results={results}
           resultBusy={resultBusy}
           executeBusy={executeBusy}
+          faucetBusy={busy === "faucet"}
           onConnect={() => void connect()}
+          onFund={() => void fundWallet()}
           onResult={(job) => void revealResult(job)}
           onExecute={(job) => void executeExistingJob(job)}
           onAction={(name, job) => void runJobAction(name, job)}
@@ -1005,7 +1199,7 @@ function PrivyHome() {
       )}
 
       {modal === "register" && <ModalShell eyebrow="Provider entry" title="Register a capability" onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void register(event)}><div className="form-grid"><Field label="Capability name" name="name" value={registerForm.name} onChange={(value) => setRegisterForm({ ...registerForm, name: value })} /><Field label="Public endpoint" name="endpoint" value={registerForm.endpoint} onChange={(value) => setRegisterForm({ ...registerForm, endpoint: value })} /><Field label="Deadline (seconds)" name="deadline" type="number" value={registerForm.deadline} onChange={(value) => setRegisterForm({ ...registerForm, deadline: value })} /><Field label="Price (GEN)" name="price" value={registerForm.price} onChange={(value) => setRegisterForm({ ...registerForm, price: value })} /><Field label="Collateral (GEN)" name="collateral" value={registerForm.collateral} onChange={(value) => setRegisterForm({ ...registerForm, collateral: value })} /><Field label="Timeout refund (%)" name="timeout" type="number" value={registerForm.timeout} onChange={(value) => setRegisterForm({ ...registerForm, timeout: value })} /><Field label="Malformed refund (%)" name="malformed" type="number" value={registerForm.malformed} onChange={(value) => setRegisterForm({ ...registerForm, malformed: value })} /></div><label className="field"><span>Terms</span><textarea value={registerForm.terms} onChange={(event) => setRegisterForm({ ...registerForm, terms: event.target.value })} /></label><label className="field"><span>Required output schema</span><textarea value={registerForm.schema} onChange={(event) => setRegisterForm({ ...registerForm, schema: event.target.value })} /></label><div className="modal-actions"><span className="modal-note">Collateral is held by Recourse until the request resolves.</span><button className="button button-acid" disabled={busy === "register"} type="submit">{busy === "register" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Register</button></div></form></ModalShell>}
-      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>After funding, the live capability runs automatically and the result appears in My escrows.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><JobRequestFields capability={selectedCapability} form={jobForm} onChange={setJobForm} /><div className="hash-note"><span className="mono">request identity</span><strong>generated at funding time</strong><p>The request hash commits to this capability, label, exact input, and a one-time nonce. It is shown in My escrows and carried through the signed receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs the escrow. The adapter runs only this listed capability.</span><button className="button button-acid" disabled={busy === "job"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund and run</button></div></form></ModalShell>}
+      {modal === "job" && selectedCapability && <ModalShell eyebrow="Buyer escrow" title={`Fund ${selectedCapability.name}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void createJob(event)}><div className="escrow-callout"><LockKeyhole size={18} /><div><strong>{formatGen(selectedCapability.price_wei)} moves into escrow.</strong><span>Wallet balance: {formatGen(balance)}. After funding, the live capability runs automatically and the result appears in My escrows.</span></div></div><Field label="Request label" name="label" value={jobForm.label} onChange={(value) => setJobForm({ ...jobForm, label: value })} /><JobRequestFields capability={selectedCapability} form={jobForm} onChange={setJobForm} /><div className="hash-note"><span className="mono">request identity</span><strong>generated at funding time</strong><p>The request hash commits to this capability, label, exact input, and a one-time nonce. It is shown in My escrows and carried through the signed receipt and public evidence.</p></div><div className="modal-actions"><span className="modal-note">Privy signs the escrow. The adapter runs only this listed capability.</span><div className="modal-button-group"><button className="button button-line" type="button" onClick={() => void fundWallet()} disabled={busy === "faucet"}>{busy === "faucet" ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Get test GEN</button><button className="button button-acid" disabled={busy === "job" || busy === "faucet"} type="submit">{busy === "job" ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />} Fund and run</button></div></div></form></ModalShell>}
       {modal === "receipt" && selectedJob && <ModalShell eyebrow="Provider execution" title={`Submit receipt for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void submitReceipt(event)}><Field label="Output hash" name="outputHash" value={receiptForm.outputHash} onChange={(value) => setReceiptForm({ ...receiptForm, outputHash: value })} placeholder="sha256:..." /><div className="form-grid"><label className="field"><span>Response status</span><select value={receiptForm.status} onChange={(event) => setReceiptForm({ ...receiptForm, status: event.target.value })}><option value="success">Success</option><option value="timeout">Timeout</option><option value="malformed">Malformed</option></select></label><Field label="HTTP status" name="code" type="number" value={receiptForm.code} onChange={(value) => setReceiptForm({ ...receiptForm, code: value })} /><Field label="Latency (ms)" name="latency" type="number" value={receiptForm.latency} onChange={(value) => setReceiptForm({ ...receiptForm, latency: value })} /></div><label className="check-field"><input type="checkbox" checked={receiptForm.schemaValid} onChange={(event) => setReceiptForm({ ...receiptForm, schemaValid: event.target.checked })} /> Output matched the required schema</label><div className="modal-actions"><span className="modal-note">Your embedded wallet signs the canonical receipt.</span><button className="button button-acid" disabled={busy === "receipt"} type="submit">{busy === "receipt" ? <LoaderCircle className="spin" size={15} /> : <FileCheck2 size={15} />} Sign and commit</button></div></form></ModalShell>}
       {modal === "evidence" && selectedJob && <ModalShell eyebrow="Monitor evidence" title={`Publish evidence for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void publishEvidence(event)}><Field label="Public evidence URL" name="url" value={evidenceForm.url} onChange={(value) => setEvidenceForm({ url: value })} placeholder="https://adapter.example.com/evidence/..." /><div className="evidence-callout"><ScanLine size={18} /><span>Validators fetch this JSON themselves. It must match the provider’s signed receipt exactly.</span></div><div className="modal-actions"><span className="modal-note">Monitor access is enforced by the contract.</span><button className="button button-acid" disabled={busy === "evidence"} type="submit">{busy === "evidence" ? <LoaderCircle className="spin" size={15} /> : <ScanLine size={15} />} Publish evidence</button></div></form></ModalShell>}
       {modal === "dispute" && selectedJob && <ModalShell eyebrow="Onchain justice" title={`Open recourse for Job ${selectedJob.job_id}`} onClose={() => setModal("none")}><form className="form" onSubmit={(event) => void openDispute(event)}><label className="field"><span>Dispute type</span><select value={disputeForm.type} onChange={(event) => setDisputeForm({ ...disputeForm, type: event.target.value })}><option value="quality">Quality</option><option value="terms">Terms</option></select></label><label className="field"><span>Complaint</span><textarea value={disputeForm.complaint} onChange={(event) => setDisputeForm({ ...disputeForm, complaint: event.target.value })} required /></label><div className="modal-actions"><span className="modal-note">Validators receive the signed evidence and complaint.</span><button className="button button-acid" disabled={busy === "dispute"} type="submit">{busy === "dispute" ? <LoaderCircle className="spin" size={15} /> : <Gavel size={15} />} Open dispute</button></div></form></ModalShell>}

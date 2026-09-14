@@ -3,6 +3,7 @@
 import {
   createClient,
   encodeInternalMessageFeeParams,
+  isSuccessful,
   MessageType,
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
@@ -60,16 +61,31 @@ function isTransientRpcError(message: string) {
 function rpcErrorMessage(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
   if (/unexpected token ['"<]/i.test(message) || /<!doctype html>|not valid json/i.test(message)) {
-    return "Studio Next returned a temporary non-JSON response while confirming the transaction. Recourse will retry automatically.";
+    return "Studio Next returned a temporary non-JSON response. Try again shortly.";
   }
   if (/rate limit|too many requests|429/i.test(message)) {
-    return "Studio Next rate-limited the request. Recourse will retry automatically.";
+    return "Studio Next rate-limited the request. Try again in about a minute.";
   }
   return message;
 }
 
 function sleep(ms: number) {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+async function retryTransientRpc<T>(operation: () => Promise<T>, retries = 3): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await operation();
+    } catch (cause) {
+      lastError = cause;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!isTransientRpcError(message) || attempt === retries) throw cause;
+      await sleep(1500 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function getReader() {
@@ -264,6 +280,10 @@ export async function loadState(): Promise<AppState> {
   };
 }
 
+export async function readJobs(): Promise<Job[]> {
+  return parse<Job[]>(await read("get_jobs") || "[]");
+}
+
 export async function readJob(jobId: string): Promise<Job | null> {
   const value = await read("get_job", [jobId]);
   if (!value) return null;
@@ -278,6 +298,42 @@ export async function readReputation(address: string): Promise<Reputation | null
   const value = await read("get_reputation", [address]);
   readCache.set(key, { value, expiresAt: Date.now() + REPUTATION_CACHE_TTL_MS });
   return parse<Reputation>(value);
+}
+
+export async function readBalance(address: string): Promise<bigint> {
+  if (!address) return 0n;
+  return retryTransientRpc(() =>
+    scheduleRead(() =>
+      getReader().getBalance({ address: address as `0x${string}` }),
+    ),
+  );
+}
+
+export async function fundStudioAccount(
+  address: string,
+  amountWei = 10_000_000_000_000_000_000n,
+) {
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    throw new Error("A valid Studio Next wallet address is required.");
+  }
+  const response = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: `{"jsonrpc":"2.0","id":1,"method":"sim_fundAccount","params":["${address}",${amountWei}]}`,
+  });
+  const text = await response.text();
+  let body: { result?: unknown; error?: { message?: unknown } } | null = null;
+  try {
+    body = JSON.parse(text);
+  } catch {}
+  if (!response.ok || body?.error) {
+    const fallback = response.status === 429
+      ? "Studio Next rate-limited the faucet request. Try again in about a minute."
+      : "Studio Next faucet request failed.";
+    throw new Error(String(body?.error?.message || fallback));
+  }
+  clearReadCache();
+  return String(body?.result || "");
 }
 
 function writer(address: string, provider: WalletProvider) {
@@ -326,28 +382,35 @@ export async function write(
       : {};
   let fees;
   try {
-    fees = await client.estimateTransactionFeesForWrite({
+    fees = await retryTransientRpc(() =>
+      client.estimateTransactionFeesForWrite({
+        address: CONTRACT_ADDRESS as `0x${string}`,
+        functionName,
+        args,
+        value,
+        leaderOnly: false,
+        ...feeOptions,
+      }),
+    );
+  } catch {
+    fees = await retryTransientRpc(() => client.estimateTransactionFees(feeOptions));
+  }
+  let hash;
+  try {
+    hash = await client.writeContract({
       address: CONTRACT_ADDRESS as `0x${string}`,
       functionName,
       args,
       value,
-      leaderOnly: false,
-      ...feeOptions,
+      fees: {
+        distribution: fees.distribution,
+        messageAllocations: fees.messageAllocations,
+        feeValue: fees.feeValue,
+      },
     });
-  } catch {
-    fees = await client.estimateTransactionFees(feeOptions);
+  } catch (cause) {
+    throw new Error(rpcErrorMessage(cause));
   }
-  const hash = await client.writeContract({
-    address: CONTRACT_ADDRESS as `0x${string}`,
-    functionName,
-    args,
-    value,
-    fees: {
-      distribution: fees.distribution,
-      messageAllocations: fees.messageAllocations,
-      feeValue: fees.feeValue,
-    },
-  });
   let receipt;
   let lastError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -370,8 +433,8 @@ export async function write(
     }
   }
   if (!receipt) throw new Error(rpcErrorMessage(lastError));
-  const result = String(receipt.txExecutionResultName ?? "");
-  if (result && result !== "FINISHED_WITH_RETURN") {
+  if (!isSuccessful(receipt)) {
+    const result = String(receipt.txExecutionResultName ?? "unknown");
     throw new Error(`Transaction finalized with execution result ${result}.`);
   }
   clearReadCache();
