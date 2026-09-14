@@ -5,9 +5,12 @@ import pytest
 from .conftest import (
     AFTER_DEADLINE,
     PRICE,
+    START,
+    accept_job,
     capability_args,
     create_job,
     evidence_body,
+    mock_json_prompt,
     publish_evidence,
     receipt_hash,
     register_capability,
@@ -67,12 +70,12 @@ def test_job_requires_exact_price_and_provider_cannot_buy_own_capability(
     direct_vm.sender = direct_bob
     direct_vm.value = PRICE - 1
     with direct_vm.expect_revert("escrow must equal"):
-        contract.create_job(capability_id, "request_hash_1", "Find five sources")
+        contract.create_job(capability_id, "sha256:" + "1" * 64, "Find five sources")
 
     direct_vm.sender = direct_alice
     direct_vm.value = PRICE
     with direct_vm.expect_revert("cannot buy own"):
-        contract.create_job(capability_id, "request_hash_1", "Find five sources")
+        contract.create_job(capability_id, "sha256:" + "1" * 64, "Find five sources")
 
 
 def test_only_provider_can_submit_receipt(
@@ -104,7 +107,7 @@ def test_missing_receipt_can_be_refunded_after_deadline(
     capability = json.loads(contract.get_capability(capability_id))
     assert capability["reserved_collateral_wei"] == PRICE
 
-    set_time(direct_vm, AFTER_DEADLINE)
+    set_time(direct_vm, "2026-01-01T00:30:00+00:00")
     direct_vm.sender = direct_bob
     direct_vm.value = 0
     contract.claim_timeout(job_id)
@@ -126,11 +129,11 @@ def test_missing_receipt_uses_configured_timeout_refund(
     set_time(direct_vm, START)
     direct_vm.sender = direct_alice
     direct_vm.value = 10 * 10**18
-    # Use a partial timeout rule so this path cannot silently default to 100%.
     capability_id = contract.register_capability(*args)
     job_id = create_job(direct_vm, contract, direct_bob, capability_id)
+    accept_job(direct_vm, contract, direct_alice, job_id)
 
-    set_time(direct_vm, AFTER_DEADLINE)
+    set_time(direct_vm, "2026-01-01T00:10:30+00:00")
     direct_vm.sender = direct_bob
     direct_vm.value = 0
     contract.claim_timeout(job_id)
@@ -153,7 +156,7 @@ def test_collateral_capacity_limits_open_jobs(
     direct_vm.sender = direct_charlie
     direct_vm.value = PRICE
     with direct_vm.expect_revert("fully reserved"):
-        contract.create_job(capability_id, "request_hash_2", "Another request")
+        contract.create_job(capability_id, "sha256:" + "2" * 64, "Another request")
 
 
 def test_evidence_mismatch_reverts_before_settlement(
@@ -163,35 +166,22 @@ def test_evidence_mismatch_reverts_before_settlement(
     capability_id = register_capability(direct_vm, contract, direct_alice)
     job_id = create_job(direct_vm, contract, direct_bob, capability_id)
     submit_receipt(direct_vm, contract, direct_alice, job_id)
-    evidence_id = publish_evidence(
-        direct_vm,
-        contract,
-        direct_owner,
-        job_id,
-        "https://evidence.recourse.example/job-1",
-        json.dumps(
-            {
-                "job_id": job_id,
-                "request_hash": "wrong",
-                "output_hash": "output_hash_1",
-                "response_status": "success",
-                "response_code": 200,
-                "latency_ms": 1200,
-                "schema_valid": True,
-                "completed_at": "2026-01-01T00:00:10+00:00",
-                "provider": "wrong-provider",
-                "receipt_signature": "provider-signature-1",
-                "receipt_hash": "wrong",
-            }
-        ),
-    )
-
-    set_time(direct_vm, AFTER_DEADLINE)
-    direct_vm.sender = direct_bob
+    job = json.loads(contract.get_job(job_id))
+    receipt = json.loads(contract.get_receipt(job_id))
+    invalid = json.loads(evidence_body(job, receipt))
+    invalid["request_hash"] = "wrong"
     with direct_vm.expect_revert("does not match"):
-        contract.settle_job(job_id)
+        publish_evidence(
+            direct_vm,
+            contract,
+            direct_owner,
+            job_id,
+            "https://evidence.recourse.example/job-1",
+            json.dumps(invalid),
+        )
+
     assert json.loads(contract.get_job(job_id))["status"] == "receipt_submitted"
-    assert json.loads(contract.get_evidence(evidence_id))["evidence_id"] == evidence_id
+    assert json.loads(contract.get_job(job_id))["evidence_id"] == ""
 
 
 @pytest.mark.parametrize(
@@ -281,15 +271,16 @@ def test_dispute_consensus_decision_refunds_and_marks_reputation(
         "quality",
         "The response cites sources that do not support the requested claim.",
     )
-    direct_vm.mock_llm(
+    mock_json_prompt(
+        direct_vm,
         r".*GenLayer adjudicator for a request-level service escrow.*",
-        json.dumps(
-            {
+        {
                 "decision": "partial_refund",
                 "refund_bps": 5000,
                 "rule_ids": ["quality_support"],
-            }
-        ),
+                "rationale": "The delivered citation does not support the requested claim.",
+                "supporting_quotes": [{"source": "output", "quote": "Supporting passage"}],
+        },
     )
     contract.resolve_dispute(dispute_id)
 
