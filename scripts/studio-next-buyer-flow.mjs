@@ -18,13 +18,11 @@ const EXPECTED_CHAIN_ID = 61997;
 const RPC = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS?.trim() || "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35";
 const ADAPTER_URL = (process.env.RECOURSE_ADAPTER_URL?.trim() || "https://recourse-evidence.onrender.com").replace(/\/+$/, "");
-const PROVIDER_KEY = process.env.DEPLOYER_KEY?.trim() || process.env.AGENT_SIGNING_KEY?.trim();
 const BUYER_KEY = process.env.DEMO_BUYER_KEY?.trim() || (await readFile(resolve(root, ".demo/buyer-key"), "utf8")).trim();
-const PROVIDER_MESSAGE_FEE = 150000000000000000n;
 const KEY_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 
-if (!KEY_PATTERN.test(PROVIDER_KEY || "") || !KEY_PATTERN.test(BUYER_KEY || "")) {
-  throw new Error("DEPLOYER_KEY/AGENT_SIGNING_KEY and DEMO_BUYER_KEY must be 32-byte private keys");
+if (!KEY_PATTERN.test(BUYER_KEY || "")) {
+  throw new Error("DEMO_BUYER_KEY must be a 32-byte private key");
 }
 
 function canonicalJson(value) {
@@ -54,12 +52,8 @@ function parseJson(value, label) {
 }
 
 async function main() {
-  const provider = createAccount(PROVIDER_KEY);
   const buyer = createAccount(BUYER_KEY);
-  if (provider.address.toLowerCase() === buyer.address.toLowerCase()) {
-    throw new Error("provider and buyer must be different accounts");
-  }
-  const client = createClient({ chain: studioDevnet, endpoint: RPC, account: provider });
+  const client = createClient({ chain: studioDevnet, endpoint: RPC, account: buyer });
   const chainId = Number(await client.getChainId());
   if (chainId !== EXPECTED_CHAIN_ID) throw new Error(`connected to chain ${chainId}, expected ${EXPECTED_CHAIN_ID}`);
 
@@ -121,7 +115,7 @@ async function main() {
   const buyerBalance = await client.getBalance({ address: buyer.address });
   const price = BigInt(capability.price_wei);
   const feeEstimate = await client.estimateTransactionFees();
-  if (buyerBalance < price + feeEstimate.feeValue + PROVIDER_MESSAGE_FEE) {
+  if (buyerBalance < price + feeEstimate.feeValue) {
     throw new Error("demo buyer does not have enough GEN for a live request; fund the embedded buyer first");
   }
 

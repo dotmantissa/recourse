@@ -144,6 +144,11 @@ exact request and a fresh nonce, computes the `recourse-request-v2` SHA-256
 commitment, signs `create_job` with the capability's exact `price_wei`, and
 waits for the resulting job to be readable before executing it.
 
+The browser buyer flow is authorized by the user's Privy embedded wallet. The
+`smoke:buyer-flow` utility mirrors that flow with `DEMO_BUYER_KEY` only; the
+provider signer is the adapter's server-side `AGENT_SIGNING_KEY`, which stays
+on Render and signs receipts and submits provider-side chain transactions.
+
 Each execution requires the funded job identity in headers:
 
 ```bash
