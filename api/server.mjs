@@ -7,9 +7,10 @@ import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
 import JSONbig from "json-bigint";
 import "dotenv/config";
-import { deploymentScope, resultAccessMessage, validateAccessExpiry } from "../sdk/protocol.mjs";
+import { deploymentScope, requestCommitment, resultAccessMessage, validateAccessExpiry, verifyDelivery, verifyEvidencePacket } from "../sdk/protocol.mjs";
 import { createDurableExecutor } from "./execution.mjs";
 import { createGithubStateStore } from "./github-state-store.mjs";
+import { maintenanceAction, runMaintenance } from "./maintenance.mjs";
 import {
   HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
   parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
@@ -98,6 +99,7 @@ const agentAccount = /^0x[0-9a-fA-F]{64}$/.test(AGENT_SIGNING_KEY)
 let chainClient = null;
 let privyClient = null;
 let githubWriteQueue = Promise.resolve();
+let chainWriteQueue = Promise.resolve();
 const jobExecutionLocks = new Map();
 const limitExecution = createWorkLimiter(8);
 const limitRequests = createWorkLimiter(64);
@@ -155,13 +157,7 @@ function canonicalJson(value) {
 }
 
 function hashRequest(capabilityId, requestLabel, request, nonce) {
-  const canonical = canonicalJson({
-    capability_id: String(capabilityId),
-    request: request ?? null,
-    request_label: String(requestLabel).trim(),
-    nonce: String(nonce).trim(),
-    version: "recourse-request-v2",
-  });
+  const canonical = requestCommitment({ chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, capabilityId: String(capabilityId), requestLabel, request, nonce });
   return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 
@@ -406,10 +402,15 @@ async function executeAgent(slug, payload) {
 
 async function signedAgentReceipt(slug, payload, output, startedAt, provider) {
   const outputText = canonicalJson(output);
+  if (Buffer.byteLength(outputText) > 65536) throw new Error("output exceeds the committed evidence size limit");
   const outputHash = `sha256:${createHash("sha256").update(outputText).digest("hex")}`;
   const requestHash = String(payload.request_hash);
   const schemaValid = payload.schema_valid === true;
   const receipt = {
+    version: "recourse-receipt-v2",
+    chain_id: CHAIN_ID,
+    contract_address: CONTRACT_ADDRESS.toLowerCase(),
+    capability_id: String(payload.capability_id),
     job_id: String(payload.job_id),
     request_hash: requestHash,
     output_hash: outputHash,
@@ -443,6 +444,10 @@ function outputMatchesSchema(output, schemaText) {
 
 function parseEvidencePayload(payload) {
   const core = {
+    version: "recourse-receipt-v2",
+    chain_id: CHAIN_ID,
+    contract_address: CONTRACT_ADDRESS.toLowerCase(),
+    capability_id: parseId(payload.capability_id, "capability_id"),
     job_id: parseId(payload.job_id),
     request_hash: assertString(payload.request_hash, "request_hash", 1, 128).toLowerCase(),
     output_hash: assertString(payload.output_hash, "output_hash", 1, 128).toLowerCase(),
@@ -736,7 +741,7 @@ function transferAllocations(recipients) {
   );
 }
 
-async function writeChain(functionName, args = [], value = 0n, recipients = []) {
+async function writeChainUnlocked(functionName, args = [], value = 0n, recipients = []) {
   const client = getChainClient();
   const messageAllocations = transferAllocations(recipients);
   const feeOptions = messageAllocations.length > 0
@@ -757,6 +762,9 @@ async function writeChain(functionName, args = [], value = 0n, recipients = []) 
     });
   } catch {
     fees = await client.estimateTransactionFees(feeOptions);
+  }
+  if (BigInt(fees.feeValue) > BigInt(process.env.WORKER_MAX_TRANSACTION_FEE_WEI || "5000000000000000000")) {
+    throw new Error("transaction fee exceeds the worker fee budget");
   }
   const hash = await client.writeContract({
     address: CONTRACT_ADDRESS,
@@ -780,6 +788,12 @@ async function writeChain(functionName, args = [], value = 0n, recipients = []) 
     throw new Error(`${functionName} finalized with execution failure`);
   }
   return String(hash);
+}
+
+function writeChain(functionName, args = [], value = 0n, recipients = []) {
+  const operation = chainWriteQueue.then(() => writeChainUnlocked(functionName, args, value, recipients));
+  chainWriteQueue = operation.then(() => undefined, () => undefined);
+  return operation;
 }
 
 async function matchingJob(slug, jobId, requestHash) {
@@ -821,14 +835,19 @@ async function prepareAgentJob(slug, payload, request) {
 
 async function executePreparedJob(input) {
   const { slug, jobId, requestHash, requestLabel, capabilityId, requestPayload } = input;
-  const { job, capability } = await matchingJob(slug, jobId, requestHash);
+  let { job, capability } = await matchingJob(slug, jobId, requestHash);
   const existing = await readResult(jobId);
   if (existing && !storedResultMatchesJob(existing, job, capabilityId, requestLabel)) {
     throw new Error("stored result does not match the funded request");
   }
   let result = existing;
+  if (result) await verifyDelivery(result, job, capability);
   if (!result) {
-    if (job.status !== "funded") {
+    if (job.status === "funded") {
+      await writeChain("accept_job", [jobId]);
+      job = await readChainJson("get_job", [jobId]);
+    }
+    if (job.status !== "accepted") {
       throw new Error(`job is ${job.status} and has no recoverable stored result`);
     }
     if (Number(job.deadline_at) * 1000 <= Date.now()) throw new Error("funded job execution deadline has passed");
@@ -840,6 +859,7 @@ async function executePreparedJob(input) {
     });
     const signed = await signedAgentReceipt(slug, {
       job_id: jobId,
+      capability_id: capabilityId,
       request_hash: requestHash,
       schema_valid: outputMatchesSchema(output, capability.output_schema),
     }, output, startedAt, agentAccount.address);
@@ -849,6 +869,9 @@ async function executePreparedJob(input) {
       request_hash: requestHash,
       request_label: requestLabel,
       request: requestPayload,
+      request_json: requestCommitment({ chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, capabilityId,
+        requestLabel, request: requestPayload, nonce: input.nonce }),
+      output_json: canonicalJson(signed.output),
       output: signed.output,
       receipt: signed.receipt,
       receipt_hash: signed.receipt_hash,
@@ -868,6 +891,8 @@ async function deliverAgentResult(result, input) {
     ...result.receipt,
     receipt_signature: result.receipt_signature,
     receipt_hash: result.receipt_hash,
+    request_json: result.request_json,
+    output_json: result.output_json,
   };
   const existingEvidence = await readPacket(jobId);
   if (existingEvidence && existingEvidence.receipt_hash !== result.receipt_hash) {
@@ -876,7 +901,7 @@ async function deliverAgentResult(result, input) {
   if (!existingEvidence) await writePacket(jobId, evidencePacket);
 
   let latestJob = await readChainJson("get_job", [jobId]);
-  if (latestJob?.status === "funded") {
+  if (latestJob?.status === "accepted") {
     receiptTxHash = await writeChain("submit_receipt", [
       jobId,
       result.receipt.request_hash,
@@ -907,6 +932,8 @@ async function deliverAgentResult(result, input) {
 const executionStore = createGithubStateStore({ request: githubRequest, repository: GITHUB_REPOSITORY,
   branch: GITHUB_EVIDENCE_BRANCH, scope: STORAGE_SCOPE, encode: encryptResult, decode: decryptResult });
 const durableExecutor = createDurableExecutor({ store: executionStore, execute: executePreparedJob, deliver: deliverAgentResult });
+const maintenanceStore = createGithubStateStore({ request: githubRequest, repository: GITHUB_REPOSITORY,
+  branch: GITHUB_EVIDENCE_BRANCH, scope: `${STORAGE_SCOPE}/maintenance`, encode: encryptResult, decode: decryptResult });
 
 function scheduleExecution(jobId) {
   if (jobExecutionLocks.has(jobId)) return;
@@ -928,21 +955,21 @@ async function completeAgentJob(slug, payload, request) {
 }
 
 let workerTimer;
-let workerCursor = 1;
+let workerCursor = 0;
 let workerScanning = false;
 
 async function recoverExecutions() {
   if (workerScanning || !agentAccount || !GITHUB_TOKEN || !PUBLIC_BASE_URL) return;
   workerScanning = true;
   try {
-    const counts = await readChainJson("get_counts");
-    const total = Number(counts?.jobs || 0);
-    if (!total) return;
-    for (let index = 0; index < Math.min(total, 8); index += 1) {
-      if (workerCursor > total) workerCursor = 1;
-      const jobId = String(workerCursor++);
-      const job = await readChainJson("get_job", [jobId]);
-      if (String(job?.provider).toLowerCase() === agentAccount.address.toLowerCase()) scheduleExecution(jobId);
+    const page = await readChainJson("get_jobs_page", [BigInt(workerCursor), 50n]);
+    workerCursor = Number(page.next_cursor) >= Number(page.total) ? 0 : Number(page.next_cursor);
+    for (const job of page.items) {
+      if (String(job.provider).toLowerCase() !== agentAccount.address.toLowerCase() || job.status === "settled") continue;
+      scheduleExecution(String(job.job_id));
+      const action = maintenanceAction(job, Math.floor(Date.now() / 1000));
+      if (action) await runMaintenance({ store: maintenanceStore, job, action,
+        submit: (method, id, recipients) => writeChain(method, [id], 0n, recipients) });
     }
   } catch {
     console.error("Execution recovery scan unavailable; retrying on the next interval");
@@ -1182,7 +1209,10 @@ async function handleRequest(request, response) {
         ...core,
         receipt_signature: signature,
         receipt_hash: receiptHash,
+        request_json: assertString(payload.request_json, "request_json", 1, 65536),
+        output_json: assertString(payload.output_json, "output_json", 1, 65536),
       };
+      await verifyEvidencePacket(packet, job);
       const existing = await readPacket(core.job_id);
       if (existing && existing.receipt_hash !== receiptHash) {
         return json(

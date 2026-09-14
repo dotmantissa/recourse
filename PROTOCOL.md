@@ -49,6 +49,16 @@ The hosted worker needs uptime, persistent storage and transaction-fee funding.
 Its per-action retries are bounded; permissionless recovery remains available
 when the worker cannot complete an action. Internal payouts execute on finality
 and require appropriate recipient fee allocations in the submitting transaction.
+The worker serializes local chain writes, persists a maximum of eight attempts
+per maintenance action, and enforces `WORKER_MAX_TRANSACTION_FEE_WEI` (default
+5 GEN per transaction). Both recipients are budgeted for partial payouts.
+This is not an aggregate wallet spend cap or exactly-once transaction-fee promise.
+
+`scripts/publish-evidence.mjs` packages protocol-v2 evidence into a
+deployment-scoped local path only after verifying its signature and document
+commitments. It refuses overwrites and does not submit a chain transaction.
+The hosted API additionally checks the actual onchain job/receipt before
+persisting evidence; the contract independently verifies publication.
 
 ## Adjudication and bounded schemas
 
