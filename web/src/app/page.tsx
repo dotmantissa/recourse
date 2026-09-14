@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import {
   ArrowDownRight,
@@ -211,13 +211,45 @@ function ModalShell({
   onClose: () => void;
   children: React.ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+  useEffect(() => { closeRef.current = onClose; }, [onClose]);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    const selector = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]';
+    dialog?.querySelector<HTMLElement>(selector)?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRef.current();
+      }
+      if (event.key !== "Tab") return;
+      const targets = Array.from(dialog?.querySelectorAll<HTMLElement>(selector) ?? []);
+      const first = targets[0];
+      const last = targets.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previous?.focus();
+    };
+  }, []);
   return (
     <div className="modal-backdrop">
-      <div className="modal">
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="modal-head">
           <div>
             <span className="eyebrow">{eyebrow}</span>
-            <h2>{title}</h2>
+            <h2 id={titleId}>{title}</h2>
           </div>
           <button className="icon-button" aria-label="Close dialog" title="Close dialog" onClick={onClose}>
             <X size={18} />
@@ -552,6 +584,7 @@ function BuyerDashboard({
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | Job["status"]>("all");
   const [page, setPage] = useState(0);
+  const [hiddenResults, setHiddenResults] = useState<Record<string, boolean>>({});
   const buyerJobs = useMemo(() => jobs
     .filter((job) => job.buyer.toLowerCase() === address.toLowerCase())
     .filter((job) => {
@@ -615,7 +648,7 @@ function BuyerDashboard({
               <div className="dashboard-job-footer">
                 <div className="dashboard-links">
                   {evidenceRecord && <a className="text-link" href={evidenceRecord.evidence_url} target="_blank" rel="noreferrer"><ExternalLink size={14} /> Public evidence</a>}
-                  <button className="text-link" onClick={() => onResult(job)} disabled={resultBusy === job.job_id}>{resultBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <FileCheck2 size={14} />} {result ? "Refresh result" : "Reveal result"}</button>
+                  <button className="text-link" aria-expanded={Boolean(result && !hiddenResults[job.job_id])} aria-controls={`result-${job.job_id}`} onClick={() => result ? setHiddenResults((current) => ({ ...current, [job.job_id]: !current[job.job_id] })) : onResult(job)} disabled={resultBusy === job.job_id}>{resultBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <FileCheck2 size={14} />} {result && !hiddenResults[job.job_id] ? "Hide result" : "Reveal result"}</button>
                 </div>
                 <div className="dashboard-actions">
                   {job.status === "funded" && <button className="button button-acid small" onClick={() => onExecute(job)} disabled={executeBusy === job.job_id}>{executeBusy === job.job_id ? <LoaderCircle className="spin" size={14} /> : <Orbit size={14} />} {executeBusy === job.job_id ? "Running" : "Execute now"}</button>}
@@ -625,8 +658,8 @@ function BuyerDashboard({
                   {job.status === "receipt_submitted" && <button className="button button-dark small" disabled={!job.evidence_id || Number(job.deadline_at) * 1000 > now} title={!job.evidence_id ? "The public evidence packet must be published first" : Number(job.deadline_at) * 1000 > now ? `Available after ${formatDate(job.deadline_at)}` : "Settle this escrow"} onClick={() => onAction("settle", job)}><ShieldCheck size={14} /> {!job.evidence_id ? "Waiting for evidence" : Number(job.deadline_at) * 1000 > now ? "Settle after deadline" : "Settle"}</button>}
                 </div>
               </div>
-              {result && (
-                <div className="result-drawer">
+              {result && !hiddenResults[job.job_id] && (
+                <div className="result-drawer" id={`result-${job.job_id}`}>
                   <div className="result-drawer-head"><span className="eyebrow">Delivered output</span><span className="mono">{result.receipt.output_hash}</span></div>
                   <pre><code>{JSON.stringify(result.output, null, 2)}</code></pre>
                   <div className="result-receipt"><span><BadgeCheck size={14} /> signed receipt verified by adapter</span><span>{result.receipt.latency_ms}ms · {result.receipt.response_status}</span></div>
@@ -864,8 +897,10 @@ function PrivyHome() {
 
   async function register(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const context = await walletContext();
-    await action("register", () => write(context.address, context.provider, "register_capability", [registerForm.name, registerForm.endpoint, registerForm.terms, BigInt(registerForm.deadline), registerForm.schema, BigInt(registerForm.timeout) * 100n, BigInt(registerForm.malformed) * 100n, parseGen(registerForm.price)], parseGen(registerForm.collateral)));
+    await action("register", async () => {
+      const context = await walletContext();
+      return write(context.address, context.provider, "register_capability", [registerForm.name, registerForm.endpoint, registerForm.terms, BigInt(registerForm.deadline), registerForm.schema, BigInt(registerForm.timeout) * 100n, BigInt(registerForm.malformed) * 100n, parseGen(registerForm.price)], parseGen(registerForm.collateral));
+    });
   }
 
   async function findJob(requestHash: string, buyer: string) {
@@ -924,6 +959,7 @@ function PrivyHome() {
   async function submitReceipt(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedJob) return;
+    await action("receipt", async () => {
     const context = await walletContext();
     const completedAt = receiptForm.completedAt || new Date().toISOString();
     const outputHash = receiptForm.outputHash.trim().toLowerCase();
@@ -938,21 +974,26 @@ function PrivyHome() {
       completed_at: completedAt,
       provider: selectedJob.provider,
     });
-    await action("receipt", () => write(context.address, context.provider, "submit_receipt", [selectedJob.job_id, selectedJob.request_hash, outputHash, receiptForm.status, BigInt(receiptForm.code), BigInt(receiptForm.latency), receiptForm.schemaValid, completedAt, signed.signature]));
+    return write(context.address, context.provider, "submit_receipt", [selectedJob.job_id, selectedJob.request_hash, outputHash, receiptForm.status, BigInt(receiptForm.code), BigInt(receiptForm.latency), receiptForm.schemaValid, completedAt, signed.signature]);
+    });
   }
 
   async function publishEvidence(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedJob) return;
-    const context = await walletContext();
-    await action("evidence", () => write(context.address, context.provider, "publish_evidence", [selectedJob.job_id, evidenceForm.url]));
+    await action("evidence", async () => {
+      const context = await walletContext();
+      return write(context.address, context.provider, "publish_evidence", [selectedJob.job_id, evidenceForm.url]);
+    });
   }
 
   async function openDispute(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedJob) return;
-    const context = await walletContext();
-    await action("dispute", () => write(context.address, context.provider, "open_dispute", [selectedJob.job_id, disputeForm.type, disputeForm.complaint]));
+    await action("dispute", async () => {
+      const context = await walletContext();
+      return write(context.address, context.provider, "open_dispute", [selectedJob.job_id, disputeForm.type, disputeForm.complaint]);
+    });
   }
 
   async function revealResult(job: Job) {
