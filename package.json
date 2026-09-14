@@ -6,6 +6,7 @@
   "scripts": {
     "api:start": "node api/server.mjs",
     "api:check": "node --check api/server.mjs",
+    "test:api": "node --test tests/api/*.test.mjs",
     "lint:contracts": ".venv/bin/genvm-lint check contracts/Recourse.py",
     "test": ".venv/bin/pytest tests/direct -q",
     "test:contracts": ".venv/bin/pytest tests/direct -v",
@@ -24,8 +25,10 @@
   },
   "dependencies": {
     "@privy-io/node": "^0.34.0",
+    "ajv": "^8.20.0",
     "dotenv": "^17.2.2",
     "genlayer-js": "2.0.0-rc.1",
+    "ipaddr.js": "^2.2.0",
     "viem": "^2.56.3"
   }
 }

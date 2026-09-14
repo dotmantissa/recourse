@@ -1,8 +1,13 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { lookup } from "node:dns/promises";
 import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import Ajv from "ajv";
+import ipaddr from "ipaddr.js";
 import {
   createClient,
   encodeInternalMessageFeeParams,
@@ -85,6 +90,7 @@ const agentAccount = /^0x[0-9a-fA-F]{64}$/.test(AGENT_SIGNING_KEY)
 let chainClient = null;
 let privyClient = null;
 let githubWriteQueue = Promise.resolve();
+const jobExecutionLocks = new Map();
 
 function corsHeaders(request, isPublic = false) {
   const origin = request.headers.origin || "";
@@ -97,10 +103,11 @@ function corsHeaders(request, isPublic = false) {
   return allowedOrigin
     ? {
         "Access-Control-Allow-Origin": allowedOrigin,
-        "Access-Control-Allow-Headers": "authorization, content-type, x-payment, x-recourse-job-id, x-recourse-request-hash, x-recourse-request-label, x-recourse-capability-id, x-recourse-request-nonce, x-recourse-wallet, x-recourse-signature",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        Vary: "Origin",
-      }
+      "Access-Control-Allow-Headers": "authorization, content-type, x-payment, x-recourse-job-id, x-recourse-request-hash, x-recourse-request-label, x-recourse-capability-id, x-recourse-request-nonce, x-recourse-wallet, x-recourse-signature",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      ...(isPublic ? { "Access-Control-Expose-Headers": "PAYMENT-REQUIRED" } : {}),
+      Vary: "Origin",
+    }
     : {};
 }
 
@@ -268,6 +275,14 @@ function assertHttpUrl(value, field) {
   return url;
 }
 
+function decodeSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -276,6 +291,65 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function privateIp(address) {
+  const normalized = String(address).toLowerCase();
+  if (!isIP(normalized)) return true;
+  try {
+    const parsed = ipaddr.parse(normalized);
+    const candidate = parsed.kind() === "ipv6" && parsed.isIPv4MappedAddress()
+      ? parsed.toIPv4Address()
+      : parsed;
+    return candidate.range() !== "unicast";
+  } catch {
+    return true;
+  }
+}
+
+async function assertPublicUrl(value, field) {
+  const url = assertHttpUrl(value, field);
+  if (url.username || url.password || url.hostname === "localhost" || url.hostname.endsWith(".localhost")
+    || url.hostname.endsWith(".local") || url.hostname.endsWith(".internal")) {
+    throw new Error(`${field} must resolve to a public host`);
+  }
+  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some((entry) => privateIp(entry.address))) {
+    throw new Error(`${field} must resolve to a public host`);
+  }
+  return url;
+}
+
+async function fetchPublicUrl(value, options = {}, timeoutMs = 8000, maxRedirects = 3) {
+  let current = typeof value === "string" ? value : value.toString();
+  for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
+    const url = await assertPublicUrl(current, "url");
+    const response = await fetchWithTimeout(url.toString(), { ...options, redirect: "manual" }, timeoutMs);
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) throw new Error("public URL returned a redirect without a location");
+    if (redirect === maxRedirects) throw new Error("public URL exceeded redirect limit");
+    current = new URL(location, url).toString();
+  }
+  throw new Error("public URL could not be fetched");
+}
+
+async function readTextLimited(response, maxBytes) {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error("remote response exceeded size limit");
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function stripMarkup(value) {
@@ -303,7 +377,7 @@ async function executeAgent(slug, payload) {
     const crossrefUrl = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(query)}&rows=5&select=title,URL,author,published,container-title`;
     const response = await fetchWithTimeout(crossrefUrl, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`source index returned ${response.status}`);
-    const body = await response.json();
+    const body = JSON.parse(await readTextLimited(response, 1_000_000));
     const items = Array.isArray(body?.message?.items) ? body.message.items : [];
     const sources = items.slice(0, 5).map((item) => {
       const title = Array.isArray(item.title) ? String(item.title[0] || "") : "";
@@ -326,16 +400,17 @@ async function executeAgent(slug, payload) {
     if (!Array.isArray(payload.sources) || payload.sources.length < 1 || payload.sources.length > 10) {
       throw new Error("sources must contain 1-10 URLs");
     }
-    const sources = payload.sources.map((value) => assertHttpUrl(value, "source"));
+    const sources = await Promise.all(payload.sources.map((value) => assertPublicUrl(value, "source")));
     const checks = await Promise.all(sources.map(async (url) => {
       try {
-        const response = await fetchWithTimeout(url, { headers: { Accept: "text/html,application/xhtml+xml" }, redirect: "follow" }, 6000);
-        const text = stripMarkup(await response.text()).slice(0, 30000);
-        const titleMatch = text.match(/^(.{1,180}?)(?:\s{2,}|$)/);
+        const response = await fetchPublicUrl(url, { headers: { Accept: "text/html,application/xhtml+xml" } }, 6000);
+        const raw = await readTextLimited(response, 120_000);
+        const text = stripMarkup(raw).slice(0, 30_000);
+        const titleMatch = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         return {
           url: url.toString(),
           reachable: response.ok,
-          title: titleMatch?.[1] || url.hostname,
+          title: stripMarkup(titleMatch?.[1] || "").slice(0, 180) || url.hostname,
           status: response.status,
         };
       } catch {
@@ -388,10 +463,10 @@ async function executeAgent(slug, payload) {
   }
 
   if (slug === "page-brief") {
-    const url = assertHttpUrl(payload.url, "url");
-    const response = await fetchWithTimeout(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain" }, redirect: "follow" }, 8000);
+    const url = await assertPublicUrl(payload.url, "url");
+    const response = await fetchPublicUrl(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain" } }, 8000);
     if (!response.ok) throw new Error(`page returned ${response.status}`);
-    const raw = await response.text();
+    const raw = await readTextLimited(response, 1_000_000);
     const text = stripMarkup(raw);
     const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || url.hostname;
     const phraseCounts = new Map();
@@ -410,14 +485,15 @@ async function signedAgentReceipt(slug, payload, output, startedAt, provider) {
   });
   const outputHash = `sha256:${createHash("sha256").update(outputText).digest("hex")}`;
   const requestHash = String(payload.request_hash);
+  const schemaValid = payload.schema_valid === true;
   const receipt = {
     job_id: String(payload.job_id),
     request_hash: requestHash,
     output_hash: outputHash,
-    response_status: "success",
+    response_status: schemaValid ? "success" : "malformed",
     response_code: 200,
     latency_ms: Math.max(0, Date.now() - startedAt),
-    schema_valid: true,
+    schema_valid: schemaValid,
     completed_at: new Date().toISOString(),
     provider,
   };
@@ -432,11 +508,21 @@ async function signedAgentReceipt(slug, payload, output, startedAt, provider) {
   };
 }
 
+function outputMatchesSchema(output, schemaText) {
+  try {
+    const schema = JSON.parse(String(schemaText));
+    const validate = new Ajv({ allErrors: true, strict: false }).compile(schema);
+    return validate(output) === true;
+  } catch {
+    return false;
+  }
+}
+
 function parseEvidencePayload(payload) {
   const core = {
     job_id: String(payload.job_id || ""),
-    request_hash: String(payload.request_hash || "").trim(),
-    output_hash: String(payload.output_hash || "").trim(),
+    request_hash: assertString(payload.request_hash, "request_hash", 1, 128).toLowerCase(),
+    output_hash: assertString(payload.output_hash, "output_hash", 1, 128).toLowerCase(),
     response_status: String(payload.response_status || "").trim(),
     response_code: parseInteger(payload.response_code, "response_code"),
     latency_ms: parseInteger(payload.latency_ms, "latency_ms"),
@@ -445,12 +531,11 @@ function parseEvidencePayload(payload) {
     provider: String(payload.provider || "").trim(),
   };
   packetPath(core.job_id);
-  if (!core.request_hash || !core.output_hash) {
-    throw new Error("request_hash and output_hash are required");
-  }
   if (!ALLOWED_STATUSES.has(core.response_status)) {
     throw new Error("response_status must be success, timeout, or malformed");
   }
+  if (core.response_code > 599) throw new Error("response_code must be at most 599");
+  if (core.latency_ms > 86400000) throw new Error("latency_ms must be at most 86400000");
   if (!/^0x[a-fA-F0-9]{40}$/.test(core.provider)) {
     throw new Error("provider must be a 20-byte address");
   }
@@ -458,6 +543,32 @@ function parseEvidencePayload(payload) {
     throw new Error("completed_at must be an ISO date");
   }
   return core;
+}
+
+function evidenceMatchesChain(core, signature, job, receipt) {
+  return Boolean(job && receipt)
+    && String(job.job_id || "") === core.job_id
+    && String(job.request_hash || "").toLowerCase() === core.request_hash
+    && String(job.provider || "").toLowerCase() === core.provider.toLowerCase()
+    && String(receipt.request_hash || "").toLowerCase() === core.request_hash
+    && String(receipt.output_hash || "").toLowerCase() === core.output_hash
+    && String(receipt.response_status || "") === core.response_status
+    && Number(receipt.response_code) === core.response_code
+    && Number(receipt.latency_ms) === core.latency_ms
+    && Boolean(receipt.schema_valid) === core.schema_valid
+    && String(receipt.completed_at || "") === core.completed_at
+    && String(receipt.receipt_signature || "") === signature;
+}
+
+function storedResultMatchesJob(result, job, capabilityId, requestLabel) {
+  return Boolean(result && job)
+    && String(result.job_id || "") === String(job.job_id)
+    && String(result.capability_id || "") === String(capabilityId)
+    && String(result.request_hash || "").toLowerCase() === String(job.request_hash || "").toLowerCase()
+    && String(result.request_label || "") === String(requestLabel)
+    && String(result.receipt?.job_id || "") === String(job.job_id)
+    && String(result.receipt?.request_hash || "").toLowerCase() === String(job.request_hash || "").toLowerCase()
+    && String(result.receipt?.provider || "").toLowerCase() === String(job.provider || "").toLowerCase();
 }
 
 async function readPacket(jobId) {
@@ -591,7 +702,14 @@ async function writeResult(jobId, result) {
   await rename(temporary, target);
 }
 
-function paymentRequirement() {
+async function paymentRequirement(capabilityId) {
+  let amount = REQUEST_PRICE_WEI;
+  if (capabilityId && /^\d{1,20}$/.test(capabilityId)) {
+    try {
+      const capability = await readChainJson("get_capability", [capabilityId]);
+      if (capability?.price_wei !== undefined) amount = String(capability.price_wei);
+    } catch {}
+  }
   return {
     version: "1",
     scheme: "genlayer-native",
@@ -599,11 +717,39 @@ function paymentRequirement() {
     chain_id: CHAIN_ID,
     rpc_url: RPC_URL,
     asset: "GEN",
-    amount: REQUEST_PRICE_WEI,
+    amount,
     contract_address: CONTRACT_ADDRESS,
     action: "create_job",
+    ...(capabilityId ? { capability_id: capabilityId } : {}),
     description: "Fund a Recourse request escrow on GenLayer Studio Next.",
   };
+}
+
+function parsePaymentEnvelope(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {}
+  try {
+    const parsed = JSON.parse(Buffer.from(text, "base64").toString("utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function paymentEnvelopeMatches(paymentEnvelope, requirement, job, capability) {
+  return String(paymentEnvelope.scheme || "") === requirement.scheme
+    && String(paymentEnvelope.network || "") === requirement.network
+    && Number(paymentEnvelope.chain_id) === CHAIN_ID
+    && String(paymentEnvelope.asset || "") === requirement.asset
+    && String(paymentEnvelope.action || "") === requirement.action
+    && String(paymentEnvelope.contract_address || "").toLowerCase() === CONTRACT_ADDRESS.toLowerCase()
+    && String(paymentEnvelope.job_id || "") === String(job.job_id)
+    && String(paymentEnvelope.capability_id || "") === String(job.capability_id)
+    && String(paymentEnvelope.amount || "") === String(capability.price_wei);
 }
 
 await mkdir(EVIDENCE_DIR, { recursive: true });
@@ -703,13 +849,12 @@ async function writeChain(functionName, args = [], value = 0n, recipients = []) 
   return String(hash);
 }
 
-async function fundedJob(slug, jobId, requestHash) {
+async function matchingJob(slug, jobId, requestHash) {
   const job = await readChainJson("get_job", [jobId]);
   const capability = job
     ? await readChainJson("get_capability", [String(job.capability_id)])
     : null;
   if (!job || !capability) throw new Error("funded job could not be found on Studio Next");
-  if (job.status !== "funded") throw new Error(`job is ${job.status}, not funded`);
   if (String(job.request_hash).toLowerCase() !== requestHash.toLowerCase()) {
     throw new Error("request hash does not match the funded job");
   }
@@ -723,7 +868,7 @@ async function fundedJob(slug, jobId, requestHash) {
   return { job, capability };
 }
 
-async function completeAgentJob(slug, payload, request) {
+async function completeAgentJobUnlocked(slug, payload, request) {
   const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
   const requestHash = assertString(request.headers["x-recourse-request-hash"], "x-recourse-request-hash", 1, 128).toLowerCase();
   const requestLabel = assertString(request.headers["x-recourse-request-label"], "x-recourse-request-label", 1, 240);
@@ -736,12 +881,18 @@ async function completeAgentJob(slug, payload, request) {
   if (hashRequest(capabilityId, requestLabel, requestPayload, nonce) !== requestHash) {
     throw new Error("request payload does not match the funded request hash");
   }
-  const { job } = await fundedJob(slug, jobId, requestHash);
+  const { job, capability } = await matchingJob(slug, jobId, requestHash);
   const existing = await readResult(jobId);
+  if (existing && !storedResultMatchesJob(existing, job, capabilityId, requestLabel)) {
+    throw new Error("stored result does not match the funded request");
+  }
   let result = existing;
   let receiptTxHash = "";
   let evidenceTxHash = "";
   if (!result) {
+    if (job.status !== "funded") {
+      throw new Error(`job is ${job.status} and has no recoverable stored result`);
+    }
     const startedAt = Date.now();
     const output = await executeAgent(slug, {
       ...requestPayload,
@@ -751,6 +902,7 @@ async function completeAgentJob(slug, payload, request) {
     const signed = await signedAgentReceipt(slug, {
       job_id: jobId,
       request_hash: requestHash,
+      schema_valid: outputMatchesSchema(output, capability.output_schema),
     }, output, startedAt, agentAccount.address);
     result = {
       job_id: jobId,
@@ -765,13 +917,18 @@ async function completeAgentJob(slug, payload, request) {
       stored_at: new Date().toISOString(),
     };
     await writeResult(jobId, result);
-    const evidencePacket = {
-      ...signed.receipt,
-      receipt_signature: signed.receipt_signature,
-      receipt_hash: signed.receipt_hash,
-    };
-    await writePacket(jobId, evidencePacket);
   }
+
+  const evidencePacket = {
+    ...result.receipt,
+    receipt_signature: result.receipt_signature,
+    receipt_hash: result.receipt_hash,
+  };
+  const existingEvidence = await readPacket(jobId);
+  if (existingEvidence && existingEvidence.receipt_hash !== result.receipt_hash) {
+    throw new Error("stored evidence does not match the funded request result");
+  }
+  if (!existingEvidence) await writePacket(jobId, evidencePacket);
 
   let latestJob = await readChainJson("get_job", [jobId]);
   if (latestJob?.status === "funded") {
@@ -802,13 +959,34 @@ async function completeAgentJob(slug, payload, request) {
   };
 }
 
+async function completeAgentJob(slug, payload, request) {
+  const jobId = assertString(request.headers["x-recourse-job-id"], "x-recourse-job-id", 1, 128);
+  const previous = jobExecutionLocks.get(jobId);
+  let release;
+  const turn = new Promise((resolveTurn) => { release = resolveTurn; });
+  jobExecutionLocks.set(jobId, turn);
+  try {
+    if (previous) await previous;
+    return await completeAgentJobUnlocked(slug, payload, request);
+  } finally {
+    release();
+    if (jobExecutionLocks.get(jobId) === turn) jobExecutionLocks.delete(jobId);
+  }
+}
+
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
   const publicCors = corsHeaders(request, true);
   const restrictedCors = corsHeaders(request);
 
   if (request.method === "OPTIONS") {
-    response.writeHead(204, restrictedCors);
+    const publicPreflight = url.pathname === "/"
+      || url.pathname === "/health"
+      || url.pathname === "/agents"
+      || url.pathname.startsWith("/agents/")
+      || url.pathname.startsWith("/evidence/")
+      || url.pathname === "/x402/request";
+    response.writeHead(204, publicPreflight ? publicCors : restrictedCors);
     return response.end();
   }
 
@@ -880,7 +1058,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname.startsWith("/agents/")) {
-    const slug = decodeURIComponent(url.pathname.slice("/agents/".length));
+    const slug = decodeSegment(url.pathname.slice("/agents/".length));
     const definition = AGENT_DEFINITIONS[slug];
     return definition
       ? json(
@@ -898,7 +1076,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "POST" && url.pathname.startsWith("/agents/") && url.pathname.endsWith("/execute")) {
-    const slug = decodeURIComponent(url.pathname.slice("/agents/".length, -"/execute".length));
+    const slug = decodeSegment(url.pathname.slice("/agents/".length, -"/execute".length));
     if (!AGENT_DEFINITIONS[slug]) {
       return json(response, 404, { error: "agent capability not found" }, publicCors);
     }
@@ -925,7 +1103,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname.startsWith("/results/")) {
-    const jobId = decodeURIComponent(url.pathname.slice("/results/".length));
+    const jobId = decodeSegment(url.pathname.slice("/results/".length));
     try {
       const claims = await authenticate(request);
       const job = await readChainJson("get_job", [jobId]);
@@ -961,7 +1139,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname.startsWith("/evidence/")) {
-    const jobId = decodeURIComponent(url.pathname.slice("/evidence/".length));
+    const jobId = decodeSegment(url.pathname.slice("/evidence/".length));
     try {
       const packet = await readPacket(jobId);
       return packet
@@ -993,6 +1171,23 @@ const server = createServer(async (request, response) => {
       });
       if (!signatureValid) {
         return json(response, 422, { error: "receipt signature is invalid" }, restrictedCors);
+      }
+      let job;
+      let receipt;
+      try {
+        [job, receipt] = await Promise.all([
+          readChainJson("get_job", [core.job_id]),
+          readChainJson("get_receipt", [core.job_id]),
+        ]);
+      } catch (error) {
+        return json(response, 503, {
+          error: error instanceof Error ? error.message : "Studio Next evidence verification is unavailable",
+        }, restrictedCors);
+      }
+      if (!evidenceMatchesChain(core, signature, job, receipt)) {
+        return json(response, 422, {
+          error: "evidence does not match the onchain job and signed receipt",
+        }, restrictedCors);
       }
       const packet = {
         ...core,
@@ -1027,7 +1222,15 @@ const server = createServer(async (request, response) => {
   }
 
   if (request.method === "POST" && url.pathname === "/x402/request") {
-    const requirement = paymentRequirement();
+    let body = {};
+    try {
+      const raw = await readBody(request);
+      if (raw.trim()) body = JSON.parse(raw);
+    } catch {
+      return json(response, 400, { error: "x402 request body must be valid JSON" }, publicCors);
+    }
+    const capabilityId = String(request.headers["x-recourse-capability-id"] || body.capability_id || "").trim();
+    const requirement = await paymentRequirement(capabilityId);
     if (!request.headers["x-payment"]) {
       const encoded = Buffer.from(JSON.stringify(requirement)).toString("base64");
       return json(
@@ -1038,16 +1241,54 @@ const server = createServer(async (request, response) => {
       );
     }
     const jobId = String(request.headers["x-recourse-job-id"] || "").trim();
+    if (!jobId) {
+      return json(response, 422, {
+        error: "native Studio Next payment verification requires x-recourse-job-id",
+        accepts: [requirement],
+      }, publicCors);
+    }
+    const paymentEnvelope = parsePaymentEnvelope(request.headers["x-payment"]);
+    if (!paymentEnvelope) {
+      return json(response, 422, {
+        error: "x-payment must be a JSON or base64 JSON native-GEN payment envelope",
+        accepts: [requirement],
+      }, publicCors);
+    }
+    let job;
+    let capability;
+    try {
+      job = await readChainJson("get_job", [jobId]);
+      capability = job ? await readChainJson("get_capability", [String(job.capability_id)]) : null;
+    } catch (error) {
+      return json(response, 503, {
+        error: error instanceof Error ? error.message : "Studio Next escrow verification is unavailable",
+      }, publicCors);
+    }
+    if (!job || !capability || job.status !== "funded") {
+      return json(response, 422, { error: "no currently funded native GEN escrow was found for this payment intent" }, publicCors);
+    }
+    if (String(job.escrow_wei) !== String(capability.price_wei)) {
+      return json(response, 422, { error: "no matching native GEN escrow was found for this payment intent" }, publicCors);
+    }
+    if (capabilityId && String(job.capability_id) !== capabilityId) {
+      return json(response, 422, { error: "payment intent capability does not match the funded job" }, publicCors);
+    }
+    if (!paymentEnvelopeMatches(paymentEnvelope, requirement, job, capability)) {
+      return json(response, 422, {
+        error: "x-payment does not match the funded native-GEN job and payment requirement",
+        accepts: [requirement],
+      }, publicCors);
+    }
     return json(
       response,
       202,
       {
-        status: "payment_proof_received",
+        status: "payment_intent_verified",
         network: "studio-next",
         chain_id: CHAIN_ID,
-        job_id: jobId || null,
-        payment_proof: String(request.headers["x-payment"]),
-        next: jobId ? "provider_execution" : "submit_x-recourse-job-id",
+        job_id: jobId,
+        verification: "native_gen_escrow",
+        next: "provider_execution",
       },
       publicCors,
     );
@@ -1056,9 +1297,11 @@ const server = createServer(async (request, response) => {
   return json(response, 404, { error: "not found" }, publicCors);
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Recourse adapter listening on 0.0.0.0:${PORT}`);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Recourse adapter listening on 0.0.0.0:${PORT}`);
+  });
+}
 
 function shutdown(signal) {
   console.log(`${signal} received; closing Recourse adapter`);
@@ -1068,3 +1311,15 @@ function shutdown(signal) {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+export {
+  assertPublicUrl,
+  evidenceMatchesChain,
+  hashRequest,
+  outputMatchesSchema,
+  parsePaymentEnvelope,
+  paymentEnvelopeMatches,
+  privateIp,
+  readTextLimited,
+  storedResultMatchesJob,
+};
