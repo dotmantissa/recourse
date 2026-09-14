@@ -26,12 +26,12 @@ are adjudicated by GenLayer and settle from the same escrow.
    compares stable decision fields from independent validator runs.
 7. The escrow pays the provider or buyer and updates provider reputation.
 
-The demo capability is a research API that returns five verified sources in
-JSON. Its terms are:
+The built-in Source Scout capability is a live research API that returns five
+verified sources in JSON. Its default terms are:
 
-- price: 2 GEN
+- price: configured onchain per capability
 - deadline: 30 seconds
-- required fields: `title`, `url`, `citation`
+- required fields: `query`, `sources`
 - valid response: 100% provider payment
 - timeout: 100% buyer refund
 - malformed response: 75% buyer refund
@@ -99,9 +99,9 @@ npm run verify:studio-next
 
 Never place a private key in source control or in a `NEXT_PUBLIC_*` variable.
 
-## Live demo
+## Operational test utility
 
-The repeatable Studio Dev demo creates one successful request and one
+The repeatable Studio Dev test utility creates one successful request and one
 malformed-response request. It signs both receipts with the provider key,
 publishes the evidence packets as public files through the authenticated
 `gh`
@@ -111,7 +111,7 @@ CLI, then settles the successful job and resolves the chargeback job.
 DEPLOYER_KEY=0x... npm run demo:studio-next
 ```
 
-The demo uses `DEMO_PRICE_WEI` when set; otherwise it uses `0.01 GEN` so it
+The test utility uses `DEMO_PRICE_WEI` when set; otherwise it uses `0.01 GEN` so it
 can run on a freshly funded Studio Dev account. Set `GITHUB_REPOSITORY` to a
 different public repository only when the raw evidence URL should point
 elsewhere.
@@ -137,6 +137,13 @@ DEPLOYER_KEY=0x... \
 npm run register:agents
 ```
 
+An autonomous buyer uses its own encrypted Studio Next signer. Privy is the
+embedded-wallet and authentication layer for the browser app; it is not a
+server-side agent credential. The buyer reads `get_capabilities`, creates the
+exact request and a fresh nonce, computes the `recourse-request-v2` SHA-256
+commitment, signs `create_job` with the capability's exact `price_wei`, and
+waits for the resulting job to be readable before executing it.
+
 Each execution requires the funded job identity in headers:
 
 ```bash
@@ -156,7 +163,41 @@ capability, and then submits the provider receipt and publishes evidence
 onchain. The response includes the live output, signed receipt, evidence URL,
 and transaction hashes. Results are encrypted with `RESULT_ENCRYPTION_KEY`
 before being written to the service directory and, when `GITHUB_TOKEN` is
-configured, to the repository's separate `evidence` branch. A buyer retrieves
-their result from `GET /results/:job_id` with a Privy access token and a wallet
-signature over the job-specific access message. It never changes the network:
-all contract and payment operations remain on Studio Next / chain `61997`.
+configured, to the repository's separate `evidence` branch. A server-side
+agent normally uses the result returned by its execution POST; the
+authenticated `GET /results/:job_id` route is the browser recovery path and
+requires a Privy access token plus a wallet signature over the job-specific
+access message. The `/x402/request` endpoint is a native-GEN compatibility
+handshake: it verifies that a matching onchain escrow exists, but it is not a
+cross-chain stablecoin bridge or a fabricated payment attestation. All
+contract and payment operations remain on Studio Next / chain `61997`.
+
+Execution is idempotent for a committed request. If an agent loses the HTTP
+response after receipt or evidence publication, it can repeat the same
+capability POST with the original job ID, request, label, and nonce. The
+adapter verifies the commitment and returns the encrypted stored delivery
+without rerunning the provider capability.
+
+After funding a job, the x402 compatibility route accepts a JSON or
+base64-encoded JSON `x-payment` envelope:
+
+```json
+{
+  "scheme": "genlayer-native",
+  "network": "studio-next",
+  "chain_id": 61997,
+  "asset": "GEN",
+  "amount": "2000000000000000000",
+  "contract_address": "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35",
+  "action": "create_job",
+  "capability_id": "2",
+  "job_id": "7"
+}
+```
+
+The request also carries `x-recourse-job-id` and, when selected explicitly,
+`x-recourse-capability-id`. A correctly shaped header is not proof by itself:
+Studio Next remains the source of truth. The adapter returns
+`202 payment_intent_verified` only when every envelope field matches the
+registered capability and the referenced job is currently funded with the
+exact native GEN price.
