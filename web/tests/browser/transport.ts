@@ -1,4 +1,4 @@
-import { address } from "./privy";
+import { address, requestWalletApproval } from "./privy";
 import { CHAIN_ID, CONTRACT_ADDRESS } from "../../src/lib/config";
 import { readPendingTransaction, submitTrackedTransaction, resumeTrackedTransaction, type FeeQuote } from "../../src/lib/transactions";
 
@@ -19,7 +19,7 @@ export const hashRequest = async () => `sha256:${"a".repeat(64)}`;
 export const pendingTransaction = () => readPendingTransaction(localStorage, scope);
 export const write = async (wallet: string, provider: unknown, method: string, args: unknown[], value: bigint, recipients: string[], approve: (quote: FeeQuote) => Promise<boolean>) => submitTrackedTransaction(environment(), async () => ({
   quote: { method, valueWei: String(value), feeWei: "100", totalWei: String(value + 100n), recipients },
-  send: async () => { localStorage.setItem("fixture-submissions", String(Number(localStorage.getItem("fixture-submissions")) + 1)); return `0x${"a".repeat(64)}`; },
+  send: async () => { await requestWalletApproval(); localStorage.setItem("fixture-submissions", String(Number(localStorage.getItem("fixture-submissions")) + 1)); return `0x${"a".repeat(64)}`; },
 }), approve, async () => { throw new Error("Fixture finality unavailable; resume without resubmission"); });
 export const resumeTransaction = async () => resumeTrackedTransaction(environment(), async () => true);
 export const clearUnbroadcastTransaction = async () => { throw new Error("Not available in fixture"); };

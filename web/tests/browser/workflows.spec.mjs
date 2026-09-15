@@ -1,5 +1,32 @@
 import { test, expect } from "@playwright/test";
 
+for (const approve of [true, false]) {
+  test(`wallet portal is interactive after fee approval and ${approve ? "signs once" : "restores a cancelled purchase"}`, async ({ page }) => {
+    await page.goto("/?wallet-modal");
+    await page.getByRole("button", { name: "Fund a request" }).click();
+    const purchase = page.getByRole("dialog", { name: "Fund Independent service" });
+    await purchase.getByLabel("Request label", { exact: true }).fill("Keep this wallet request");
+    await purchase.getByRole("checkbox").check();
+    await purchase.getByRole("button", { name: "Fund and run" }).click();
+    await page.getByRole("button", { name: "Approve budget and open wallet" }).click();
+    const wallet = page.getByRole("dialog", { name: "Wallet signature confirmation" });
+    await expect(wallet).toBeVisible();
+    await expect(page.locator("dialog:modal")).toHaveCount(0);
+    await expect(wallet.getByRole("button", { name: "Confirm wallet signature" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(wallet.getByRole("button", { name: "Cancel wallet signature" })).toBeFocused();
+    expect(await page.evaluate(() => localStorage.getItem("fixture-submissions"))).toBeNull();
+    await wallet.getByRole("button", { name: approve ? "Confirm wallet signature" : "Cancel wallet signature" }).click();
+    await expect(wallet).toHaveCount(0);
+    await expect(purchase).toBeVisible();
+    await expect(purchase.getByLabel("Request label", { exact: true })).toHaveValue("Keep this wallet request");
+    await expect(purchase.getByRole("checkbox")).toBeChecked();
+    await expect(page.getByRole("alert")).toContainText(approve ? "Its ID is saved" : "wallet rejected");
+    expect(await page.evaluate(() => localStorage.getItem("fixture-submissions"))).toBe(approve ? "1" : null);
+    if (!approve) await expect(purchase.getByRole("button", { name: "Fund and run" })).toBeEnabled();
+  });
+}
+
 test("legacy listings remain historical and cannot initiate a new purchase", async ({ page }) => {
   await page.goto("/?legacy");
   await expect(page.getByRole("status")).toContainText("Legacy deployment history");
