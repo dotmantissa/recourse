@@ -54,7 +54,7 @@ export async function verifyHostedRelease({ release, manifestHash, fetcher }) {
     return response.json();
   }
   const [adapter, health, frontend] = await Promise.all([
-    getJson(`${release.adapter}/agents`), getJson(`${release.adapter}/health`), getJson(`${release.frontendOrigin}/api/deployment`),
+    getJson(`${release.adapter}/agents`), getJson(`${release.adapter}/ready`), getJson(`${release.frontendOrigin}/api/deployment`),
   ]);
   for (const identity of [adapter, health, frontend]) {
     if (identity.chain_id !== release.chainId || identity.protocol_version !== release.protocolVersion
@@ -62,7 +62,7 @@ export async function verifyHostedRelease({ release, manifestHash, fetcher }) {
       throw new Error("Hosted frontend/backend deployment identity or catalog is stale");
     }
   }
-  if (frontend.adapter_url?.replace(/\/+$/, "") !== release.adapter || !health.ok
+  if (frontend.adapter_url?.replace(/\/+$/, "") !== release.adapter || !health.ok || health.readiness !== "dependencies_verified"
     || !/^0x[0-9a-f]{40}$/i.test(adapter.provider ?? "")) throw new Error("Hosted provider, adapter URL, or configuration health is invalid");
   return { configurationConsistent: true, provider: adapter.provider, liveAcceptanceComplete: false };
 }

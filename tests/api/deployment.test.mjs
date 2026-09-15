@@ -59,7 +59,7 @@ test("hosted release checks identities without claiming paid-flow acceptance", a
   const release = validateReleaseConfiguration(fixture());
   const manifestHash = "a".repeat(64);
   const identity = { chain_id: 61997, protocol_version: 2, contract_address: address, manifest_hash: manifestHash, rpc_url: release.rpc };
-  const records = { "/agents": { ...identity, provider: `0x${"33".repeat(20)}` }, "/health": { ...identity, ok: true },
+  const records = { "/agents": { ...identity, provider: `0x${"33".repeat(20)}` }, "/ready": { ...identity, ok: true, readiness: "dependencies_verified" },
     "/api/deployment": { ...identity, adapter_url: release.adapter } };
   const fetcher = async (url) => Response.json(records[new URL(url).pathname]);
   const report = await verifyHostedRelease({ release, manifestHash, fetcher });

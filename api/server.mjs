@@ -13,6 +13,8 @@ import { executeAgent } from "./agents.mjs";
 import { AGENT_DEFINITIONS, MANIFEST_HASH, hostedCapabilityMatches, validateAgentRequest } from "../agents/catalog.mjs";
 import { createGithubStateStore } from "./github-state-store.mjs";
 import { maintenanceAction, runMaintenance } from "./maintenance.mjs";
+import { createReadiness, createStorageProbe } from "./readiness.mjs";
+import { verifyDeployment } from "../sdk/deployment.mjs";
 import {
   HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
   parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
@@ -769,6 +771,27 @@ const executionStore = createGithubStateStore({ request: githubRequest, reposito
 const durableExecutor = createDurableExecutor({ store: executionStore, execute: executePreparedJob, deliver: deliverAgentResult });
 const maintenanceStore = createGithubStateStore({ request: githubRequest, repository: GITHUB_REPOSITORY,
   branch: GITHUB_EVIDENCE_BRANCH, scope: `${STORAGE_SCOPE}/maintenance`, encode: encryptResult, decode: decryptResult });
+const readinessStore = createGithubStateStore({ request: githubRequest, repository: GITHUB_REPOSITORY,
+  branch: GITHUB_EVIDENCE_BRANCH, scope: `${STORAGE_SCOPE}/readiness`, encode: encryptResult, decode: decryptResult });
+
+function requireRuntimeConfiguration() {
+  encryptionKey();
+  if (!agentAccount || !PUBLIC_BASE_URL || !GITHUB_TOKEN || !MONITOR_SECRET || !PRIVY_APP_ID || !PRIVY_APP_SECRET) throw new Error("required runtime configuration is missing");
+  publicUrl(PUBLIC_BASE_URL, "PUBLIC_BASE_URL");
+  publicUrl(FRONTEND_ORIGIN, "FRONTEND_ORIGIN");
+}
+
+const checkStorage = createStorageProbe({ store: readinessStore, key: BigInt(`0x${randomBytes(6).toString("hex")}`).toString(), nonce: randomBytes(24).toString("hex") });
+const readiness = createReadiness({ checks: {
+  configuration: async () => requireRuntimeConfiguration(),
+  contract: async () => {
+    requireRuntimeConfiguration();
+    await verifyDeployment({ client: getChainClient(), address: CONTRACT_ADDRESS,
+      source: await readFile(new URL("../contracts/Recourse.py", import.meta.url), "utf8") });
+  },
+  durable_storage: async () => { requireRuntimeConfiguration(); await checkStorage(); },
+  authentication: async () => { requireRuntimeConfiguration(); await getPrivyClient().users().list({ limit: 1 }, { timeout: 8000, maxRetries: 0 }); },
+} });
 
 function scheduleExecution(jobId) {
   if (jobExecutionLocks.has(jobId)) return;
@@ -822,6 +845,7 @@ async function handleRequest(request, response) {
   if (request.method === "OPTIONS") {
     const publicPreflight = url.pathname === "/"
       || url.pathname === "/health"
+      || url.pathname === "/ready"
       || url.pathname === "/agents"
       || url.pathname.startsWith("/agents/")
       || url.pathname.startsWith("/evidence/")
@@ -854,6 +878,13 @@ async function handleRequest(request, response) {
       },
       publicCors,
     );
+  }
+
+  if (request.method === "GET" && url.pathname === "/ready") {
+    const report = await readiness();
+    return json(response, report.ok ? 200 : 503, { ...report, chain_id: CHAIN_ID, protocol_version: 2,
+      contract_address: CONTRACT_ADDRESS, manifest_hash: MANIFEST_HASH, rpc_url: RPC_URL,
+      provider: agentAccount?.address ?? null, liveAcceptanceComplete: false }, publicCors);
   }
 
   if (request.method === "GET" && url.pathname === "/health") {
@@ -1174,6 +1205,7 @@ server.requestTimeout = 30000;
 server.headersTimeout = 10000;
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  requireRuntimeConfiguration();
   workerTimer = setInterval(() => void recoverExecutions(), 30_000);
   workerTimer.unref();
   void recoverExecutions();
