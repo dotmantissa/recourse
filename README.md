@@ -95,6 +95,11 @@ npm run setup:contracts
 
 Run `npm run test:api` and `npm --prefix web test` for offline HTTP, egress,
 storage-error, and RPC regression coverage. Both are included in `npm run verify`.
+`npm run verify` also includes pinned-contract multi-validator simulation. Install
+Chromium with `npm --prefix web exec -- playwright install chromium`, then run
+`npm run verify:acceptance` for the desktop/mobile browser regression suite.
+See `AUDIT-REMEDIATION.md` for implemented fixes and `RELEASE.md` for the separate
+live acceptance gates. A paused historical frontend is not an activated protocol upgrade.
 The RPC tests transpile the actual route using the installed TypeScript compiler;
 they do not contact Studio or require credentials.
 

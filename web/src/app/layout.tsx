@@ -4,7 +4,7 @@ import Providers from "./providers";
 
 export const metadata: Metadata = {
   title: "Recourse | Agent commerce with a way back",
-  description: "Request-level escrow and automatic chargebacks for agent commerce.",
+  description: "Request-level escrow, verifiable evidence, and recourse for agent commerce.",
   icons: {
     icon: "/icon.svg",
     shortcut: "/icon.svg",
