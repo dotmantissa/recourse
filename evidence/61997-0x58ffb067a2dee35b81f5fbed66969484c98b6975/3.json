@@ -1,0 +1,19 @@
+{
+  "version": "recourse-receipt-v2",
+  "chain_id": 61997,
+  "contract_address": "0x58ffb067a2dee35b81f5fbed66969484c98b6975",
+  "capability_id": "1",
+  "job_id": "3",
+  "request_hash": "sha256:d8bbd99cceb5801daf3d12a880402767f71df9f37aced22fd4d99a160ba3d31e",
+  "output_hash": "sha256:ae1140ab7bfc18cf6127fd2065a50af37c23fe5ce6d1ccae3f4201250a3d9d87",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 1295,
+  "schema_valid": true,
+  "completed_at": "2026-09-15T11:47:33.081Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0xa4ecc2ca06c21f8bd383086695737ac8b639ca3477cce618a3507464da2bbb4d54bc03a0250d2e113fa358ae307b55132f9a907904f0f00b69606750fad35a6b1b",
+  "receipt_hash": "d44849ef0b50469a77a66103a4d94e4413b2290c5715baed06033e0bdd02a334",
+  "request_json": "{\"capability_id\":\"1\",\"chain_id\":61997,\"contract_address\":\"0x58ffb067a2dee35b81f5fbed66969484c98b6975\",\"disclosure\":\"public\",\"nonce\":\"ca1a5763-c455-48d5-843c-46ba46c1d69e\",\"request\":{\"query\":\"How can autonomous agents verify external sources?\"},\"request_label\":\"Run Source Scout request\",\"version\":\"recourse-request-v3\"}",
+  "output_json": "{\"query\":\"How can autonomous agents verify external sources?\",\"sources\":[{\"citation\":\"Florent Delgrange (n.d.). Foundation World Models for Agents that Learn, Verify, and Adapt Reliably Beyond Static Environments.\",\"title\":\"Foundation World Models for Agents that Learn, Verify, and Adapt Reliably Beyond Static Environments\",\"url\":\"https://doi.org/10.65109/wcei7331\"},{\"citation\":\"Rafael Cadenas (2026). Convergent Correctness in Stochastic Code Generation: A Generate-Verify-Repair Architecture for Deterministic Validation of Autonomous AI Coding Agents in Regulated Environments.\",\"title\":\"Convergent Correctness in Stochastic Code Generation: A Generate-Verify-Repair Architecture for Deterministic Validation of Autonomous AI Coding Agents in Regulated Environments\",\"url\":\"https://doi.org/10.2139/ssrn.6754899\"},{\"citation\":\"Diodato Ferraioli, Paolo Serafino, Carmine Ventre (2016). What to Verify for Optimal Truthful Mechanisms without Money.\",\"title\":\"What to Verify for Optimal Truthful Mechanisms without Money\",\"url\":\"https://doi.org/10.65109/suim2315\"},{\"citation\":\"Abdullah Al Maruf, Luyao Niu, Bhaskar Ramasubramanian (2023). Cognitive Bias-Aware Dissemination Strategies for Opinion Dynamics with External Information Sources.\",\"title\":\"Cognitive Bias-Aware Dissemination Strategies for Opinion Dynamics with External Information Sources\",\"url\":\"https://doi.org/10.65109/zmpv2946\"},{\"citation\":\"Jonathan Ezekiel, Alessio Lomuscio (2009). Combining fault injection and model checking to verify fault tolerance in multi-agent systems.\",\"title\":\"Combining fault injection and model checking to verify fault tolerance in multi-agent systems\",\"url\":\"https://doi.org/10.65109/wina6284\"}]}"
+}
