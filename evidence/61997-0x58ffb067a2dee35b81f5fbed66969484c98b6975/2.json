@@ -1,0 +1,19 @@
+{
+  "version": "recourse-receipt-v2",
+  "chain_id": 61997,
+  "contract_address": "0x58ffb067a2dee35b81f5fbed66969484c98b6975",
+  "capability_id": "1",
+  "job_id": "2",
+  "request_hash": "sha256:d3960fc327b67c10ea71c0b1f203f405b1b679ffe97e40f23059b2722fbeec77",
+  "output_hash": "sha256:25be1adbe8780d7fbddabf43a3dba2b8cbb99efa710248169fe29ba5a560133e",
+  "response_status": "success",
+  "response_code": 200,
+  "latency_ms": 1220,
+  "schema_valid": true,
+  "completed_at": "2026-09-15T11:37:19.676Z",
+  "provider": "0xBC1399c55538eC034d4Da550C03c34Ae0C357f53",
+  "receipt_signature": "0x3fff557025e35017494a1e113dc63db27318eea352ecea0329d85dc9dd381e1f4cfb9b1dfb6edc932e9864d6781b77c46f7ede579608aa2de60296794cbcd7aa1b",
+  "receipt_hash": "1c70dad67e07d31f96d3abf5abf6ec58a8809fa2b03d2d7f0c80cadc07923e20",
+  "request_json": "{\"capability_id\":\"1\",\"chain_id\":61997,\"contract_address\":\"0x58ffb067a2dee35b81f5fbed66969484c98b6975\",\"disclosure\":\"public\",\"nonce\":\"794492e4-53d0-4338-9481-e0d351008fea\",\"request\":{\"query\":\"How can autonomous agents verify external sources?\"},\"request_label\":\"Run Source Scout request\",\"version\":\"recourse-request-v3\"}",
+  "output_json": "{\"query\":\"How can autonomous agents verify external sources?\",\"sources\":[{\"citation\":\"Florent Delgrange (n.d.). Foundation World Models for Agents that Learn, Verify, and Adapt Reliably Beyond Static Environments.\",\"title\":\"Foundation World Models for Agents that Learn, Verify, and Adapt Reliably Beyond Static Environments\",\"url\":\"https://doi.org/10.65109/wcei7331\"},{\"citation\":\"Diodato Ferraioli, Paolo Serafino, Carmine Ventre (2016). What to Verify for Optimal Truthful Mechanisms without Money.\",\"title\":\"What to Verify for Optimal Truthful Mechanisms without Money\",\"url\":\"https://doi.org/10.65109/suim2315\"},{\"citation\":\"Rafael Cadenas (2026). Convergent Correctness in Stochastic Code Generation: A Generate-Verify-Repair Architecture for Deterministic Validation of Autonomous AI Coding Agents in Regulated Environments.\",\"title\":\"Convergent Correctness in Stochastic Code Generation: A Generate-Verify-Repair Architecture for Deterministic Validation of Autonomous AI Coding Agents in Regulated Environments\",\"url\":\"https://doi.org/10.2139/ssrn.6754899\"},{\"citation\":\"Abdullah Al Maruf, Luyao Niu, Bhaskar Ramasubramanian (2023). Cognitive Bias-Aware Dissemination Strategies for Opinion Dynamics with External Information Sources.\",\"title\":\"Cognitive Bias-Aware Dissemination Strategies for Opinion Dynamics with External Information Sources\",\"url\":\"https://doi.org/10.65109/zmpv2946\"},{\"citation\":\"Jonathan Ezekiel, Alessio Lomuscio (2009). Combining fault injection and model checking to verify fault tolerance in multi-agent systems.\",\"title\":\"Combining fault injection and model checking to verify fault tolerance in multi-agent systems\",\"url\":\"https://doi.org/10.65109/wina6284\"}]}"
+}
