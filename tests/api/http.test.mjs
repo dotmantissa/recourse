@@ -31,8 +31,9 @@ test("HTTP rejects non-object payment requests without crashing", async () => {
     assert.equal(oversized.status, 413);
     assert.match((await oversized.json()).error, /large/);
     const payment = await fetch(`${origin}/x402/request`, { method: "POST", body: "{}" });
-    assert.equal(payment.status, 402);
-    assert.ok(payment.headers.get("payment-required"));
+    assert.equal(payment.status, 503);
+    assert.equal(payment.headers.get("payment-required"), null);
+    assert.match((await payment.json()).error, /release is not ready/);
     const root = await (await fetch(`${origin}/`)).json();
     assert.equal(root.x402_interoperable, false);
     const catalog = await (await fetch(`${origin}/agents`)).json();

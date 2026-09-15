@@ -31,7 +31,8 @@ function loadClient() {
     "genlayer-js/types": { transactionsStatusNumberToName: {}, TransactionHashVariant: { LATEST_FINAL: "latest-final" } },
     "json-bigint": () => ({ parse: JSON.parse }),
     "./config": { CHAIN_ID: 61997, CONTRACT_ADDRESS: contract, RPC_URL: "/api/genlayer" },
-    "./transactions": transactions, "./history": {}, "../../../sdk/protocol.mjs": {},
+    "./transactions": transactions, "./history": {}, "../../../sdk/protocol.mjs": { digest: () => "manifest" },
+    "../../../agents/manifest.json": {}, "./release": { assertPurchaseReadiness: async () => {} },
   };
   const exports = {};
   runInNewContext(clientCode, { exports, require: (name) => { if (!(name in modules)) throw new Error(name); return modules[name]; },

@@ -11,7 +11,10 @@ import { TransactionHashVariant, transactionsStatusNumberToName, type Transactio
 import JSONbig from "json-bigint";
 import { ADAPTER_URL, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from "./config";
 import { requestCommitment, resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
-import { loadRegistry, type HistoryCursor } from "./history";
+import { loadRegistry, loadLegacyRegistry, type HistoryCursor } from "./history";
+import { assertPurchaseReadiness } from "./release";
+import manifest from "../../../agents/manifest.json";
+import { digest } from "../../../sdk/protocol.mjs";
 import { acknowledgeUnbroadcastTransaction, readPendingTransaction, resumeTrackedTransaction, submitTrackedTransaction, transactionOutcome, type FeeQuote, type PendingTransaction } from "./transactions";
 import type {
   Capability,
@@ -39,6 +42,7 @@ export type WalletProvider = {
 };
 
 export type AppState = {
+  legacy?: boolean;
   history?: HistoryCursor;
   capabilities: Capability[];
   jobs: Job[];
@@ -61,17 +65,6 @@ const readTimestamps: number[] = [];
 function isTransientRpcError(message: string) {
   return /rate limit|too many requests|429|unexpected token ['"<]/i.test(message)
     || /not valid json|<!doctype html>|fetch failed|502|503|504/i.test(message);
-}
-
-function rpcErrorMessage(cause: unknown) {
-  const message = cause instanceof Error ? cause.message : String(cause);
-  if (/unexpected token ['"<]/i.test(message) || /<!doctype html>|not valid json/i.test(message)) {
-    return "Studio Next returned a temporary non-JSON response. Try again shortly.";
-  }
-  if (/rate limit|too many requests|429/i.test(message)) {
-    return "Studio Next rate-limited the request. Try again in about a minute.";
-  }
-  return message;
 }
 
 function sleep(ms: number) {
@@ -276,6 +269,9 @@ export async function fetchJobResult(
 
 export async function loadState(cursor?: HistoryCursor): Promise<AppState> {
   if (!CONTRACT_ADDRESS) return { capabilities: [], jobs: [], receipts: {}, evidence: [], disputes: [] };
+  if (CHAIN_ID === 61997 && CONTRACT_ADDRESS.toLowerCase() === "0x51edcf8f3bdbb69a6e83b1ca5076a77c2e5cdc35") {
+    return { ...await loadLegacyRegistry(async (method, args) => parse(await read(method, args)), cursor), receipts: {} };
+  }
   const registry = await loadRegistry(async (method, args) => parse(await read(method, args)), cursor);
   return { ...registry, receipts: {} };
 }
@@ -473,6 +469,9 @@ export async function write(
   approve?: (quote: FeeQuote) => Promise<boolean>,
 ) {
   if (!approve) throw new Error("Explicit fee approval is required before sending a transaction.");
+  if (["create_job", "register_capability", "resume_capability"].includes(functionName)) {
+    await assertPurchaseReadiness({ adapter: ADAPTER_URL, chainId: CHAIN_ID, contractAddress: CONTRACT_ADDRESS, rpc: RPC_URL, manifestHash: digest(manifest) });
+  }
   const hash = await submitTrackedTransaction(transactionEnvironment(address),
     () => prepareTransaction(address, provider, functionName, args, value, messageRecipients),
     async (quote) => {

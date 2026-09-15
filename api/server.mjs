@@ -581,6 +581,7 @@ function transferAllocations(recipients) {
 }
 
 async function writeChainUnlocked(functionName, args = [], value = 0n, recipients = []) {
+  await requireDependencyReadiness();
   const client = getChainClient();
   const messageAllocations = transferAllocations(recipients);
   const feeOptions = messageAllocations.length > 0
@@ -793,6 +794,10 @@ const readiness = createReadiness({ checks: {
   authentication: async () => { requireRuntimeConfiguration(); await getPrivyClient().users().list({ limit: 1 }, { timeout: 8000, maxRetries: 0 }); },
 } });
 
+async function requireDependencyReadiness() {
+  if (!(await readiness()).ok) throw new HttpError(503, "Protocol release is not ready; new execution and worker writes are paused");
+}
+
 function scheduleExecution(jobId) {
   if (jobExecutionLocks.has(jobId)) return;
   jobExecutionLocks.set(jobId, true);
@@ -820,6 +825,7 @@ async function recoverExecutions() {
   if (workerScanning || !agentAccount || !GITHUB_TOKEN || !PUBLIC_BASE_URL) return;
   workerScanning = true;
   try {
+    await requireDependencyReadiness();
     const page = await readChainJson("get_jobs_page", [BigInt(workerCursor), 50n]);
     workerCursor = Number(page.next_cursor) >= Number(page.total) ? 0 : Number(page.next_cursor);
     for (const job of page.items) {
@@ -971,6 +977,7 @@ async function handleRequest(request, response) {
     }
     try {
       const payload = parseObject(await readBody(request));
+      await requireDependencyReadiness();
       const result = await completeAgentJob(slug, payload, request);
       return json(response, result.execution_status ? 202 : 200, {
         agent: slug,
@@ -1127,6 +1134,7 @@ async function handleRequest(request, response) {
     }
     const capabilityId = request.headers["x-recourse-capability-id"] ?? body.capability_id ?? "";
     if (capabilityId !== "") parseId(capabilityId, "capability_id");
+    await requireDependencyReadiness();
     const requirement = await paymentRequirement(capabilityId);
     if (!request.headers["x-payment"]) {
       const encoded = Buffer.from(JSON.stringify(requirement)).toString("base64");
