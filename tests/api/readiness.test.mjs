@@ -14,13 +14,22 @@ test("dependency readiness caches probes, coalesces callers, and reports outages
   assert.equal(calls, 1);
   time = 11;
   fail = true;
-  assert.deepEqual(await probe(), { ok: false, readiness: "dependency_unavailable" });
+  assert.deepEqual(await probe(), { ok: false, readiness: "dependency_unavailable", failed_checks: ["storage"] });
   assert.equal(calls, 2);
 });
 
 test("readiness bounds a stalled dependency without publishing its error", async () => {
   const probe = createReadiness({ timeoutMs: 10, checks: { hung: () => new Promise(() => {}) } });
-  assert.deepEqual(await probe(), { ok: false, readiness: "dependency_unavailable" });
+  assert.deepEqual(await probe(), { ok: false, readiness: "dependency_unavailable", failed_checks: ["hung"] });
+});
+
+test("readiness identifies only failing or unfinished checks and never error details", async () => {
+  const probe = createReadiness({ timeoutMs: 10, checks: {
+    available: async () => {},
+    failed: async () => { throw new Error("secret-token"); },
+    unfinished: () => new Promise(() => {}),
+  } });
+  assert.deepEqual(await probe(), { ok: false, readiness: "dependency_unavailable", failed_checks: ["failed", "unfinished"] });
 });
 
 test("storage readiness proves remote write/read restoration once and detects deletion", async () => {

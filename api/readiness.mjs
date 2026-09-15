@@ -7,14 +7,19 @@ export function createReadiness({ checks, now = Date.now, ttlMs = 60_000, timeou
     if (pending) return pending;
     pending = (async () => {
       let timer;
+      const unfinished = new Set(Object.keys(checks));
+      const failed = new Set();
       try {
         await Promise.race([
-          Promise.all(Object.values(checks).map((check) => Promise.resolve().then(check))),
+          Promise.all(Object.entries(checks).map(async ([name, check]) => {
+            try { await check(); } catch { failed.add(name); }
+            finally { unfinished.delete(name); }
+          })).then(() => { if (failed.size) throw new Error("readiness dependency failed"); }),
           new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error("readiness deadline")), timeoutMs); }),
         ]);
         cached = { ok: true, readiness: "dependencies_verified", checks: Object.keys(checks) };
       } catch {
-        cached = { ok: false, readiness: "dependency_unavailable" };
+        cached = { ok: false, readiness: "dependency_unavailable", failed_checks: [...failed, ...unfinished].sort() };
       } finally {
         clearTimeout(timer);
         expires = now() + ttlMs;
