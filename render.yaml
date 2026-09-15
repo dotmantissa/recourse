@@ -9,7 +9,7 @@ services:
     buildCommand: npm ci --omit=dev
     startCommand: node api/server.mjs
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeploy: false
     envVars:
       - key: EVIDENCE_DIR
         value: evidence
@@ -20,7 +20,9 @@ services:
       - key: FRONTEND_ORIGIN
         value: https://recourse-gamma.vercel.app
       - key: RECOURSE_CONTRACT_ADDRESS
-        value: 0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35
+        sync: false
+      - key: STUDIO_DEV_RPC
+        value: https://studio-dev.genlayer.com/api
       - key: REQUEST_PRICE_WEI
         value: "2000000000000000000"
       - key: MONITOR_SECRET

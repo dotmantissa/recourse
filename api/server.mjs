@@ -48,7 +48,7 @@ const CHAIN_ID = 61997;
 const STORAGE_SCOPE = deploymentScope(CHAIN_ID, CONTRACT_ADDRESS);
 const EVIDENCE_DIR = resolve(EVIDENCE_ROOT, STORAGE_SCOPE);
 const RESULT_DIR = resolve(RESULT_ROOT, STORAGE_SCOPE);
-const RPC_URL = "https://studio-dev.genlayer.com/api";
+const RPC_URL = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
 const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID || "";
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET || "";
@@ -872,6 +872,11 @@ async function handleRequest(request, response) {
           network: "studio-next",
           chain_id: CHAIN_ID,
           storage: "ready",
+          protocol_version: 2,
+          contract_address: CONTRACT_ADDRESS,
+          manifest_hash: MANIFEST_HASH,
+          readiness: "configuration_only",
+          rpc_url: RPC_URL,
           durable_evidence: Boolean(GITHUB_TOKEN),
           durable_results: Boolean(GITHUB_TOKEN && RESULT_ENCRYPTION_KEY),
           privy_configured: Boolean(process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET),
@@ -895,6 +900,7 @@ async function handleRequest(request, response) {
         manifest_hash: MANIFEST_HASH,
         protocol_version: 2,
         contract_address: CONTRACT_ADDRESS,
+        rpc_url: RPC_URL,
         agents: Object.entries(AGENT_DEFINITIONS).map(([slug, definition]) => ({
           slug,
           ...definition,

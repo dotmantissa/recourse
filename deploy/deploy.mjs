@@ -1,10 +1,10 @@
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "dotenv";
 import { createAccount, createClient, isSuccessful } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
+import { describeContract, verifyDeployment } from "../sdk/deployment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: resolve(root, ".env"), quiet: true });
@@ -12,15 +12,23 @@ config({ path: resolve(root, ".env"), quiet: true });
 const RPC = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
 const EXPECTED_CHAIN_ID = 61997;
 const key = process.env.DEPLOYER_KEY?.trim();
-if (!key || !/^0x[0-9a-fA-F]{64}$/.test(key)) {
-  throw new Error("DEPLOYER_KEY must be a 32-byte private key");
-}
 
 const source = await readFile(resolve(root, "contracts/Recourse.py"), "utf8");
 const runner = source.match(/"Depends":\s*"([^"]+)"/)?.[1];
 if (!runner || runner.includes(":latest") || runner.includes(":test")) {
   throw new Error("Recourse.py must use a pinned GenVM runner");
 }
+const description = describeContract(source);
+const args = process.argv.slice(2);
+if (args.some((arg) => arg !== "--run")) throw new Error("Usage: npm run deploy:studio-next -- [--run]");
+if (!args.includes("--run")) {
+  console.log(JSON.stringify({ mode: "dry-run", chainId: EXPECTED_CHAIN_ID, runner, ...description,
+    maximumFeeWei: process.env.DEPLOYMENT_MAX_FEE_WEI || null }, null, 2));
+  process.exit(0);
+}
+if (!key || !/^0x[0-9a-fA-F]{64}$/.test(key)) throw new Error("DEPLOYER_KEY must be a 32-byte private key");
+const maxFee = process.env.DEPLOYMENT_MAX_FEE_WEI;
+if (!/^[1-9][0-9]{0,77}$/.test(maxFee ?? "")) throw new Error("DEPLOYMENT_MAX_FEE_WEI must explicitly cap the deployment fee");
 
 const account = createAccount(key);
 const client = createClient({ chain: studioDevnet, endpoint: RPC, account });
@@ -31,6 +39,22 @@ if (chainId !== EXPECTED_CHAIN_ID) {
 
 console.log(`Deploying Recourse from ${account.address} to Studio Dev`);
 const fees = await client.estimateTransactionFees();
+if (BigInt(fees.feeValue) > BigInt(maxFee)) throw new Error("Deployment estimate exceeds the explicitly authorized fee cap");
+const directory = resolve(root, ".runtime/deployments");
+await mkdir(directory, { recursive: true, mode: 0o700 });
+const lock = resolve(directory, `${EXPECTED_CHAIN_ID}-${account.address.toLowerCase()}-${description.sourceSha256}.lock`);
+let guard;
+try { guard = await open(lock, "wx", 0o600); } catch (error) {
+  if (error.code === "EEXIST") throw new Error("A deployment is active or uncertain; reconcile its transaction before manually removing the lock");
+  throw error;
+}
+try { await guard.writeFile(`${JSON.stringify({ status: "submitting", sourceSha256: description.sourceSha256, feeWei: String(fees.feeValue) })}\n`); await guard.sync(); } finally { await guard.close(); }
+const parent = await open(directory, "r");
+try { await parent.sync(); } finally { await parent.close(); }
+try {
+  const previous = await readFile(resolve(root, "deploy/addresses.json"));
+  await writeFile(resolve(directory, `previous-${Date.now()}.json`), previous, { mode: 0o600, flag: "wx" });
+} catch (error) { if (error.code !== "ENOENT") throw error; }
 const txHash = await client.deployContract({
   code: source,
   args: [],
@@ -40,6 +64,8 @@ const txHash = await client.deployContract({
     feeValue: fees.feeValue,
   },
 });
+const checkpoint = await open(lock, "a");
+try { await checkpoint.writeFile(`${JSON.stringify({ status: "submitted", hash: txHash })}\n`); await checkpoint.sync(); } finally { await checkpoint.close(); }
 console.log(`Deployment transaction: ${txHash}`);
 const receipt = await client.waitForTransactionReceipt({
   hash: txHash,
@@ -66,21 +92,7 @@ if (!address) {
   throw new Error("Deployment receipt did not contain a contract address");
 }
 
-const [schema, deployedCode, counts] = await Promise.all([
-  client.getContractSchema(address),
-  client.getContractCode(address),
-  client.readContract({
-    address,
-    functionName: "get_counts",
-    args: [],
-    jsonSafeReturn: true,
-  }),
-]);
-const sourceSha256 = createHash("sha256").update(source).digest("hex");
-const deployedSha256 = createHash("sha256").update(String(deployedCode)).digest("hex");
-if (sourceSha256 !== deployedSha256) {
-  throw new Error("Deployed source hash does not match local source");
-}
+const verified = await verifyDeployment({ client, address, source });
 
 const metadata = {
   network: "studio-dev",
@@ -94,9 +106,9 @@ const metadata = {
   deployedAt: new Date().toISOString(),
   runner,
   feeValue: String(fees.feeValue),
-  sourceSha256,
-  counts: JSON.parse(String(counts)),
-  schemaMethods: Object.keys(schema?.methods ?? {}).sort(),
+  sourceSha256: verified.sourceSha256,
+  counts: verified.counts,
+  schemaMethods: verified.methods,
 };
 await mkdir(resolve(root, "deploy"), { recursive: true });
 await writeFile(
@@ -122,6 +134,7 @@ async function updateEnv(path, values) {
 }
 await updateEnv(resolve(root, ".env"), {
   CONTRACT_ADDRESS: address,
+  RECOURSE_CONTRACT_ADDRESS: address,
   STUDIO_DEV_RPC: RPC,
 });
 await updateEnv(resolve(root, "web/.env.local"), {
@@ -129,4 +142,5 @@ await updateEnv(resolve(root, "web/.env.local"), {
   NEXT_PUBLIC_RECOURSE_CHAIN_ID: String(EXPECTED_CHAIN_ID),
   NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS: address,
 });
+await rm(lock);
 console.log(`Recourse deployed at ${address}`);

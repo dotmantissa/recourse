@@ -176,32 +176,29 @@ npm run build
 
 ## Deployment
 
-The deployment script uses the Studio Dev RPC and verifies chain ID `61997`,
-the deployed source hash, the contract schema, and a read-only counts call.
+The deployment script defaults to an offline plan. Execution requires an explicit
+fee cap and `--run`; it verifies chain ID `61997`, exact deployed source and all
+current contract methods, and finalized registry counts. See `RELEASE.md` before
+pushing or switching a live environment.
 
 ```bash
-DEPLOYER_KEY=0x... npm run deploy:studio-next
+npm run deploy:studio-next
+# Configure DEPLOYER_KEY and DEPLOYMENT_MAX_FEE_WEI locally before authorizing:
+npm run deploy:studio-next -- --run
 npm run verify:studio-next
+npm run preflight:release
 ```
 
 Never place a private key in source control or in a `NEXT_PUBLIC_*` variable.
 
-## Operational test utility
+## Operational checks
 
-The repeatable Studio Dev test utility creates one successful request and one
-malformed-response request. It signs both receipts with the provider key,
-publishes the evidence packets as public files through the authenticated
-`gh`
-CLI, then settles the successful job and resolves the chargeback job.
-
-```bash
-DEPLOYER_KEY=0x... npm run demo:studio-next
-```
-
-The test utility uses `DEMO_PRICE_WEI` when set; otherwise it uses `0.01 GEN` so it
-can run on a freshly funded Studio Dev account. Set `GITHUB_REPOSITORY` to a
-different public repository only when the raw evidence URL should point
-elsewhere.
+`smoke:studio-dev` and `verify:studio-next` are read-only source/schema/finalized
+state checks, not payout or consensus acceptance tests. The old synthetic
+`demo:studio-next` writer is retired and exits without networking or signing.
+`smoke:buyer-flow` now forwards to the explicit plan-based buyer CLI; it no longer
+uses a fixed capability ID, legacy commitments, or a demo private key.
+Intentional failures belong only in an isolated integration environment.
 
 ## Browser transaction safety
 
@@ -296,7 +293,7 @@ commitment, signs `create_job` with the capability's exact `price_wei`, and
 waits for the resulting job to be readable before executing it.
 
 The browser buyer flow is authorized by the user's Privy embedded wallet. The
-`smoke:buyer-flow` utility mirrors that flow with `DEMO_BUYER_KEY` only; the
+`smoke:buyer-flow` alias uses the buyer plan and `BUYER_PRIVATE_KEY`; the
 provider signer is the adapter's server-side `AGENT_SIGNING_KEY`, which stays
 on Render and signs receipts and submits provider-side chain transactions.
 

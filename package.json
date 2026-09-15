@@ -19,6 +19,7 @@
     "verify": "npm run test:api && npm --prefix web test && npm run lint && npm run typecheck && npm run test && npm run build",
     "deploy:studio-next": "node deploy/deploy.mjs",
     "verify:studio-next": "node deploy/verify.mjs",
+    "preflight:release": "node scripts/release-preflight.mjs",
     "smoke:studio-dev": "node scripts/studio-dev-smoke.mjs",
     "demo:studio-next": "node scripts/studio-dev-demo.mjs",
     "smoke:buyer-flow": "node scripts/studio-next-buyer-flow.mjs",
