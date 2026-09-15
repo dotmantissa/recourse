@@ -14,6 +14,7 @@ test("recovery controls wait for receipt, evidence or adjudication deadlines", (
   const job = { status: "accepted", deadline_at: 100, receipt_deadline_at: 200 };
   assert.equal(recoveryReady(job, 100_000), false);
   assert.equal(recoveryReady(job, 200_000), true);
+  assert.equal(recoveryReady({ ...job, protocol_version: 1 }, 200_000), false);
   assert.equal(recoveryReady({ status: "receipt_submitted", evidence_id: "", evidence_deadline_at: 300 }, 300_000), true);
   assert.equal(recoveryReady({ status: "receipt_submitted", evidence_id: "1", evidence_deadline_at: 300 }, 300_000), false);
   assert.equal(recoveryReady({ status: "disputed", evidence_id: "1", resolution_deadline_at: 400 }, 400_000), true);

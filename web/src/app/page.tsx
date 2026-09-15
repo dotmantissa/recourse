@@ -199,11 +199,13 @@ function CapabilitySpecimen({
   address,
   onBuy,
   onManage,
+  legacy = false,
 }: {
   capability: Capability;
   address: string;
   onBuy: (capability: Capability) => void;
   onManage: (capability: Capability) => void;
+  legacy?: boolean;
 }) {
   const available = asWei(capability.collateral_wei) - asWei(capability.reserved_collateral_wei);
   const isOwn = Boolean(address) && capability.provider.toLowerCase() === address.toLowerCase();
@@ -232,7 +234,7 @@ function CapabilitySpecimen({
       </div>
       <div className="specimen-foot">
         <span className="mono">schema-bound request</span>
-        {isOwn ? (
+        {legacy ? <span className="mono">Historical listing · purchases paused</span> : isOwn ? (
           <button className="button button-line" onClick={() => onManage(capability)}><BadgeCheck size={14} /> Manage</button>
         ) : (
           <button className="button button-acid" disabled={capability.status !== "active"} onClick={() => onBuy(capability)}>
@@ -1141,6 +1143,7 @@ function PrivyHomeSession() {
 
       {notice && <div className="notice notice-success" role="status"><Check size={16} /> {notice}</div>}
       {error && <div className="notice notice-error" role="alert"><CircleAlert size={16} /> {error}</div>}
+      {state.legacy && <div className="notice" role="status">Legacy deployment history. New purchases are paused while the protocol upgrade and outstanding escrow recovery are completed. Historical entries are not the new service catalog.</div>}
 
       {transactionState.wallet === address && transactionState.error && <div className="hash-note" role="alert">{transactionState.error}</div>}
       {pending && <section className="hash-note" aria-label="Pending transaction">
@@ -1231,7 +1234,7 @@ function PrivyHomeSession() {
             </div>
             <div className="capability-layout">
                 <div className="capability-list">
-                {visibleCapabilities.length ? visibleCapabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} onManage={(capability) => { setSelectedCapability(capability); setCollateralAmount("1"); setModal("manage"); }} onBuy={(capability) => { setSelectedCapability(capability); setPublicEvidenceConsent(false); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
+                {visibleCapabilities.length ? visibleCapabilities.map((item) => <CapabilitySpecimen key={item.capability_id} capability={item} address={address} legacy={state.legacy} onManage={(capability) => { setSelectedCapability(capability); setCollateralAmount("1"); setModal("manage"); }} onBuy={(capability) => { setSelectedCapability(capability); setPublicEvidenceConsent(false); setJobForm({ ...defaultJobForm, label: `Run ${capability.name} request` }); setModal("job"); }} />) : (
                   <div className="empty-state"><Orbit size={23} /><h3>The rail is waiting for its first capability.</h3><p>Register an agent service below, then make its promise specific enough to verify.</p></div>
                 )}
               </div>

@@ -8,7 +8,23 @@ const source = await readFile(new URL("../src/lib/history.ts", import.meta.url),
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const exports = {};
 runInNewContext(compiled, { exports });
-const { loadRegistry } = exports;
+const { loadRegistry, loadLegacyRegistry } = exports;
+
+test("legacy migration view reads bounded individual history without exposing a purchasable catalog", async () => {
+  const calls = [];
+  const reader = async (method, args) => {
+    if (method === "get_counts") return { capabilities: 6, jobs: 9, evidence: 6, disputes: 0 };
+    calls.push([method, args]);
+    return { id: args[0] };
+  };
+  const result = await loadLegacyRegistry(reader);
+  assert.equal(result.legacy, true);
+  assert.equal(calls.length, 15);
+  assert.equal(result.jobs[0].id, "5");
+  assert.equal(result.history.jobs, 4);
+  assert.equal((await loadLegacyRegistry(reader, result.history)).jobs.length, 4);
+  await assert.rejects(loadLegacyRegistry(async () => ({ jobs: -1 })), /cursor/);
+});
 
 test("registry loads bounded recent pages and explicit older history", async () => {
   const calls = [];

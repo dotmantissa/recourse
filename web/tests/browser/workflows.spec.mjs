@@ -1,5 +1,12 @@
 import { test, expect } from "@playwright/test";
 
+test("legacy listings remain historical and cannot initiate a new purchase", async ({ page }) => {
+  await page.goto("/?legacy");
+  await expect(page.getByRole("status")).toContainText("Legacy deployment history");
+  await expect(page.getByRole("button", { name: "Fund a request" })).toHaveCount(0);
+  await expect(page.getByText("Historical listing · purchases paused")).toHaveCount(2);
+});
+
 test("disclosure, nested fee cancellation, keyboard focus, and retry preserve the form", async ({ page }) => {
   await page.goto("/");
   const trigger = page.getByRole("button", { name: "Fund a request" });

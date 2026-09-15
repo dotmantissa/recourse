@@ -1,6 +1,7 @@
 import type { Job } from "./types";
 
 export function recoveryReady(job: Job, now: number) {
+  if (job.protocol_version === 1) return false;
   if (["funded", "accepted"].includes(job.status)) return Number(job.receipt_deadline_at ?? job.deadline_at) * 1000 <= now;
   if (["receipt_submitted", "disputed"].includes(job.status) && !job.evidence_id) return Number(job.evidence_deadline_at) * 1000 <= now;
   return job.status === "disputed" && Number(job.resolution_deadline_at) * 1000 <= now;

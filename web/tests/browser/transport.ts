@@ -7,7 +7,7 @@ const environment = () => ({ storage: localStorage, scope, lock: <Result,>(key: 
 const capability = { capability_id: "1", provider: "0x3333333333333333333333333333333333333333", name: "Independent service", endpoint: "https://provider.example/work", terms: "Return a JSON object", deadline_seconds: 30, output_schema: '{"type":"object"}', timeout_refund_bps: 10000, malformed_refund_bps: 7500, price_wei: "2000000000000000000", collateral_wei: "10000000000000000000", reserved_collateral_wei: "0", status: "active" };
 export const loadState = async () => {
   if (new URLSearchParams(location.search).has("offline")) throw new Error("Fixture RPC unavailable");
-  return { capabilities: [capability, { ...capability, capability_id: "2", provider: address, name: "Owned service" }], jobs: [], receipts: {}, evidence: [], disputes: [] };
+  return { legacy: new URLSearchParams(location.search).has("legacy"), capabilities: [capability, { ...capability, capability_id: "2", provider: address, name: "Owned service" }], jobs: [], receipts: {}, evidence: [], disputes: [] };
 };
 export const clearReadCache = () => {};
 export const readBalance = async () => 100000000000000000000n;
