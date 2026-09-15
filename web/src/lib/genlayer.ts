@@ -7,7 +7,7 @@ import {
   MessageType,
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
-import { transactionsStatusNumberToName, type TransactionHash } from "genlayer-js/types";
+import { TransactionHashVariant, transactionsStatusNumberToName, type TransactionHash } from "genlayer-js/types";
 import JSONbig from "json-bigint";
 import { ADAPTER_URL, CHAIN_ID, CONTRACT_ADDRESS, RPC_URL } from "./config";
 import { requestCommitment, resultAccessMessage, verifyDelivery } from "../../../sdk/protocol.mjs";
@@ -156,6 +156,7 @@ async function read(functionName: string, args: CalldataEncodable[] = []) {
             functionName,
             args,
             jsonSafeReturn: true,
+            transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
           }),
         );
         readCache.set(key, { value, expiresAt: Date.now() + READ_CACHE_TTL_MS });

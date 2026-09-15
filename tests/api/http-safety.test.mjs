@@ -20,6 +20,37 @@ function fakeNetwork(overrides = {}) {
   return state;
 }
 
+test("provider POST requires opt-in, bounds bodies, and pins DNS", async () => {
+  const disabled = fakeNetwork();
+  await assert.rejects(disabled.fetch("https://provider.example/", { method: "POST", body: "{}" }), /explicitly enabled/);
+  assert.equal(disabled.lookups.length, 0);
+  let request;
+  const enabled = fakeNetwork({ allowPost: true, fetchResponse: async (url, options) => { request = options; return new Response("ok"); } });
+  for (const body of [undefined, Buffer.from("{}"), "x".repeat(100_001), "é".repeat(50_001)]) {
+    await assert.rejects(enabled.fetch("https://provider.example/", { method: "POST", body }), /bounded/);
+  }
+  await enabled.fetch("https://provider.example/", { method: "POST", body: "{}" });
+  assert.equal(request.method, "POST");
+  assert.equal(request.body, "{}");
+  assert.equal(request.redirect, "manual");
+  const address = await new Promise((resolve, reject) => enabled.connections[0].lookup("provider.example", {}, (error, value) => error ? reject(error) : resolve(value)));
+  assert.equal(address, "8.8.8.8");
+  assert.equal(enabled.destroyed, 1);
+});
+
+test("provider POST redirects never replay execution", async () => {
+  for (const status of [301, 302, 303, 307, 308]) {
+    let calls = 0;
+    const state = fakeNetwork({ allowPost: true, fetchResponse: async () => {
+      calls += 1;
+      return new Response(null, { status, headers: { location: "/again" } });
+    } });
+    await assert.rejects(state.fetch("https://provider.example/", { method: "POST", body: "{}" }), /not replayed/);
+    assert.equal(calls, 1);
+    assert.equal(state.destroyed, 1);
+  }
+});
+
 test("connections use only the DNS addresses validated for that hop", async () => {
   const state = fakeNetwork();
   const response = await state.fetch("https://provider.example/result");

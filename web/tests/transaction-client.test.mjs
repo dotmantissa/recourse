@@ -20,6 +20,7 @@ function loadClient() {
   const calls = [];
   const fees = { feeValue: 123n, distribution: {}, messageAllocations: [] };
   const rpc = {
+    readContract: async (options) => { calls.push(["contractRead", options]); return "{}"; },
     estimateTransactionFeesForWrite: async (options) => { calls.push(["estimate", options]); return fees; },
     writeContract: async (options) => { calls.push(["write", options]); assert.equal(JSON.parse([...records.values()][0]).hash, null); return hash; },
     getTransaction: async ({ hash: requested }) => { calls.push(["read", requested]); return { sender: wallet, recipient: contract, hash, statusName: "FINALIZED", txExecutionResultName: "FINISHED_WITH_RETURN" }; },
@@ -27,7 +28,7 @@ function loadClient() {
   const modules = {
     "genlayer-js": { createClient: () => rpc, encodeInternalMessageFeeParams: () => "encoded", MessageType: { Internal: 0 }, isSuccessful: (receipt) => receipt.txExecutionResultName === "FINISHED_WITH_RETURN" },
     "genlayer-js/chains": { studioDevnet: {} },
-    "genlayer-js/types": { transactionsStatusNumberToName: {} },
+    "genlayer-js/types": { transactionsStatusNumberToName: {}, TransactionHashVariant: { LATEST_FINAL: "latest-final" } },
     "json-bigint": () => ({ parse: JSON.parse }),
     "./config": { CHAIN_ID: 61997, CONTRACT_ADDRESS: contract, RPC_URL: "/api/genlayer" },
     "./transactions": transactions, "./history": {}, "../../../sdk/protocol.mjs": {},
@@ -38,6 +39,12 @@ function loadClient() {
   const provider = { request: async ({ method }) => method === "eth_chainId" ? "0xf22d" : [wallet] };
   return { exports, rpc, calls, records, fees, provider };
 }
+
+test("the browser contract reader explicitly selects finalized state", async () => {
+  const { exports, calls } = loadClient();
+  await exports.readJob("1");
+  assert.equal(calls.find(([method]) => method === "contractRead")[1].transactionHashVariant, "latest-final");
+});
 
 test("real write bridge requires fee approval, preserves its estimate, and verifies finality", async () => {
   const { exports, calls, fees, provider, records } = loadClient();

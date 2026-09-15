@@ -162,7 +162,7 @@ export function createWorkLimiter(limit) {
   };
 }
 
-export function createPublicFetcher({ resolveHost = lookup, fetchResponse = fetch, dispatcherFactory = (options) => new Agent(options) } = {}) {
+export function createPublicFetcher({ resolveHost = lookup, fetchResponse = fetch, dispatcherFactory = (options) => new Agent(options), allowPost = false } = {}) {
   const limitWork = createWorkLimiter(16);
   return (value, options = {}, timeoutMs = 8000, maxRedirects = 3) => limitWork(async () => {
     const timeout = AbortSignal.timeout(timeoutMs);
@@ -170,7 +170,8 @@ export function createPublicFetcher({ resolveHost = lookup, fetchResponse = fetc
     let current = value.toString();
     const headers = new Headers(options.headers);
     const method = (options.method || "GET").toUpperCase();
-    if (!["GET", "HEAD"].includes(method)) throw new Error("public URL fetch only supports GET and HEAD");
+    if (!["GET", "HEAD", ...(allowPost ? ["POST"] : [])].includes(method)) throw new Error("public URL fetch only supports GET and HEAD unless POST is explicitly enabled");
+    if (method === "POST" && (typeof options.body !== "string" || Buffer.byteLength(options.body) > 100_000)) throw new Error("public POST body must be bounded JSON text");
     for (let redirect = 0; redirect <= maxRedirects; redirect += 1) {
       const { url, addresses } = await resolvePublicUrl(current, "url", resolveHost, signal);
       const dispatcher = dispatcherFactory({ connect: {
@@ -198,6 +199,7 @@ export function createPublicFetcher({ resolveHost = lookup, fetchResponse = fetc
           });
         }
         await withSignal(response.body?.cancel(), signal);
+        if (method === "POST") throw new Error("public POST redirects are not replayed");
         const location = response.headers.get("location");
         if (!location) throw new Error("public URL returned a redirect without a location");
         if (redirect === maxRedirects) throw new Error("public URL exceeded redirect limit");

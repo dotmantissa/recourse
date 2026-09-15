@@ -22,6 +22,7 @@ import {
   MessageType,
 } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
+import { TransactionHashVariant } from "genlayer-js/types";
 import { PrivyClient } from "@privy-io/node";
 import { privateKeyToAccount } from "viem/accounts";
 import { verifyMessage } from "viem";
@@ -705,6 +706,7 @@ async function readChainJson(functionName, args = []) {
     functionName,
     args,
     jsonSafeReturn: true,
+    transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
   });
   if (!value) return null;
   try {

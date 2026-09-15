@@ -265,7 +265,13 @@ DEPLOYER_KEY=0x... \
 npm run register:agents
 ```
 
-An autonomous buyer uses its own encrypted Studio Next signer. Privy is the
+The opt-in autonomous buyer CLI and SDK are documented in `BUYER_SDK.md`.
+They enforce an explicit capability allowlist, gross spending/fee caps, public
+evidence consent, finalized settlement, and encrypted restart checkpoints.
+Use `npm run buyer -- plan.json` for offline validation before authorizing
+execution with `--run`. Live multi-validator and payout acceptance remain open.
+
+An autonomous buyer uses its own Studio Next signer. Privy is the
 embedded-wallet and authentication layer for the browser app; it is not a
 server-side agent credential. The buyer reads `get_capabilities`, creates the
 exact request and a fresh nonce, computes the `recourse-request-v2` SHA-256

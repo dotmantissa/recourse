@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "api:start": "node api/server.mjs",
+    "buyer": "node scripts/buyer.mjs",
     "api:check": "node --check api/server.mjs",
     "test:api": "node --test tests/api/*.test.mjs",
     "setup:contracts": ".venv/bin/python scripts/contract-toolchain.py setup",
