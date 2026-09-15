@@ -21,7 +21,7 @@ test("registration prints an offline manifest plan without signing or networking
   const plan = JSON.parse(stdout);
   assert.equal(plan.mode, "dry-run");
   assert.equal(plan.manifest_hash, MANIFEST_HASH);
-  assert.equal(plan.contract_address, releaseManifest.contractAddress.toLowerCase());
+  assert.equal(plan.contract_address, releaseManifest.contractAddress);
   assert.equal(plan.agents.length, 5);
   assert.ok(plan.agents.every((agent) => agent.input_schema && agent.output_schema));
   await assert.rejects(execute(process.execPath, [...command, "--run"], options), /AGENT_SIGNING_KEY must/);

@@ -6,6 +6,7 @@ import { createAccount, createClient, encodeInternalMessageFeeParams, isSuccessf
 import { studioDevnet } from "genlayer-js/chains";
 import { TransactionHashVariant, transactionsStatusNumberToName } from "genlayer-js/types";
 import JSONbig from "json-bigint";
+import { getAddress } from "viem";
 import { createPublicFetcher } from "../api/http-safety.mjs";
 import { createBuyerWorkflow, validateBuyerPlan } from "../sdk/buyer.mjs";
 import { createFileJournal } from "../sdk/file-journal.mjs";
@@ -31,8 +32,9 @@ if (args.includes("--run")) {
   if (account.address.toLowerCase() !== plan.buyer) throw new Error("BUYER_PRIVATE_KEY does not match the authorized buyer");
   const endpoint = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
   const client = createClient({ chain: studioDevnet, endpoint, account });
+  const contractAddress = getAddress(plan.contractAddress);
   if (Number(await client.getChainId()) !== plan.chainId) throw new Error("RPC chain does not match the authorized plan");
-  const schema = await client.getContractSchema(plan.contractAddress);
+  const schema = await client.getContractSchema(contractAddress);
   if (!["accept_job", "recover_job", "get_jobs_page"].every((method) => Object.hasOwn(schema.methods ?? {}, method))) throw new Error("The selected contract is not compatible with protocol v2");
   const directory = resolve(root, ".runtime/buyer");
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -45,7 +47,7 @@ if (args.includes("--run")) {
   const publicPost = createPublicFetcher({ allowPost: true });
   const transport = {
     read: async (functionName, callArgs) => {
-      const value = await client.readContract({ address: plan.contractAddress, functionName, args: callArgs, jsonSafeReturn: true,
+      const value = await client.readContract({ address: contractAddress, functionName, args: callArgs, jsonSafeReturn: true,
         transactionHashVariant: TransactionHashVariant.LATEST_FINAL });
       return typeof value === "string" ? parser.parse(value) : value;
     },
@@ -57,12 +59,12 @@ if (args.includes("--run")) {
           appealRounds: 0n, executionBudgetPerRound: 25000000000000000n, rotations: [3n], maxPriceGenPerTimeUnit: 2n,
           storageFeeMaxGasPrice: 300000000n, receiptFeeMaxGasPrice: 300000000n }) }));
       const options = unique.length ? { messageAllocations, totalMessageFees: 150000000000000000n * BigInt(unique.length) } : {};
-      const fees = await client.estimateTransactionFeesForWrite({ address: plan.contractAddress, functionName: method,
+      const fees = await client.estimateTransactionFeesForWrite({ address: contractAddress, functionName: method,
         args: callArgs, value: BigInt(value), leaderOnly: false, ...options });
       return { feeWei: String(fees.feeValue), fees };
     },
     send: async ({ method, args: callArgs, value, estimate }) => String(await client.writeContract({
-      address: plan.contractAddress, functionName: method, args: callArgs, value: BigInt(value),
+      address: contractAddress, functionName: method, args: callArgs, value: BigInt(value),
       fees: { distribution: estimate.fees.distribution, messageAllocations: estimate.fees.messageAllocations, feeValue: estimate.fees.feeValue },
     })),
     transaction: async (hash) => {

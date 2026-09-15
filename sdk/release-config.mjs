@@ -1,3 +1,5 @@
+import { getAddress } from "viem";
+
 function validateTarget(target) {
   if (Number(target.chainId) !== 61997 || !/^0x[0-9a-f]{40}$/i.test(target.contractAddress ?? "")
     || /^0x0{40}$/i.test(target.contractAddress)) throw new Error("Release requires an explicit Studio Dev contract");
@@ -16,5 +18,5 @@ export function selectReleaseDeployment(release, overrides = {}) {
     ? { ...release, contractAddress: overrides.contractAddress, rpc: overrides.rpc, chainId: Number(overrides.chainId) }
     : { ...release };
   validateTarget(selected);
-  return { ...selected, contractAddress: selected.contractAddress.toLowerCase(), configurationSource: mode === "release" ? "release_manifest" : "explicit_environment" };
+  return { ...selected, contractAddress: getAddress(selected.contractAddress), configurationSource: mode === "release" ? "release_manifest" : "explicit_environment" };
 }

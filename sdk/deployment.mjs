@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import JSONbig from "json-bigint";
 import { TransactionHashVariant } from "genlayer-js/types";
 import { selectReleaseDeployment } from "./release-config.mjs";
+import { getAddress } from "viem";
 
 export const RELEASE_CHAIN_ID = 61997;
 export const PROTOCOL_VERSION = 2;
@@ -14,6 +15,7 @@ export function describeContract(source) {
 
 export async function verifyDeployment({ client, address, source, recordedHash }) {
   if (!/^0x[0-9a-f]{40}$/i.test(address)) throw new Error("An explicit deployment address is required");
+  address = getAddress(address);
   if (Number(await client.getChainId()) !== RELEASE_CHAIN_ID) throw new Error("RPC chain does not match the release chain");
   const expected = describeContract(source);
   if (recordedHash !== undefined && recordedHash !== expected.sourceSha256) throw new Error("Recorded and local source hashes differ");
@@ -38,7 +40,7 @@ export function validateReleaseConfiguration({ backend, frontend, metadata, sour
   const frontendDeployment = selectReleaseDeployment(releaseManifest, { mode: frontend.NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE,
     contractAddress: frontend.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS, chainId: frontend.NEXT_PUBLIC_RECOURSE_CHAIN_ID, rpc: frontend.NEXT_PUBLIC_RECOURSE_RPC });
   for (const deployment of [backendDeployment, frontendDeployment]) {
-    if (deployment.contractAddress !== address || deployment.rpc !== rpc || deployment.sourceSha256 !== expected.sourceSha256) {
+    if (deployment.contractAddress.toLowerCase() !== address || deployment.rpc !== rpc || deployment.sourceSha256 !== expected.sourceSha256) {
       throw new Error("Effective deployment differs from the recorded release");
     }
   }

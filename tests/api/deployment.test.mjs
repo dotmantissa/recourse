@@ -34,6 +34,19 @@ test("deployment verification derives all current methods and requires finalized
   assert.equal(result.protocolVersion, 2);
 });
 
+test("deployment verification checksums every Studio RPC contract target", async () => {
+  const { client } = fixture();
+  const checksumAddress = "0x58ffB067A2dee35B81f5fBED66969484c98b6975";
+  for (const method of ["getContractSchema", "getContractCode", "readContract"]) {
+    const original = client[method];
+    client[method] = async (argument) => {
+      assert.equal(typeof argument === "string" ? argument : argument.address, checksumAddress);
+      return original(argument);
+    };
+  }
+  await verifyDeployment({ client, address: checksumAddress.toLowerCase(), source });
+});
+
 test("deployment verification rejects wrong chain, stale code, schema, and metadata", async () => {
   for (const [method, value, pattern] of [["getChainId", 1, /chain/], ["getContractCode", "old source", /source hashes/],
     ["getContractSchema", { methods: {} }, /method schema/], ["readContract", '{"jobs":0}', /counts/]]) {

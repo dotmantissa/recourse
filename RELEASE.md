@@ -34,6 +34,10 @@ ignored by default. `npm run preflight:release` validates the effective targets
 against `deploy/addresses.json`, the current source, and matching adapter/frontend
 origins. It does not test credential validity or change any deployment.
 
+Keep checksummed addresses for Studio RPC calls: this deployment's schema lookup
+rejects the equivalent lowercase spelling. Commitment hashes and storage scopes
+remain lowercase; the release selector and buyer transport checksum RPC targets.
+
 Previews can explicitly opt into `RECOURSE_DEPLOYMENT_MODE=environment` on the
 backend and `NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE=environment` on the frontend.
 Then all three corresponding address, chain, and RPC variables are required:
