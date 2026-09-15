@@ -25,3 +25,16 @@ test("registration requires HTTPS and fails closed when hosted manifest is unava
   await assert.rejects(validateRegistrationEndpoint("https://adapter.example/execute", "provider", "https://adapter.example", async () => new Response("unavailable", { status: 503 })), /unavailable/);
   await validateRegistrationEndpoint("https://independent.example/execute", "provider", "https://adapter.example", async () => { throw new Error("must not fetch an arbitrary endpoint"); });
 });
+
+test("hosted registration rejects mismatched service terms before requesting a wallet write", async () => {
+  const endpoint = "https://adapter.example/agents/research/execute";
+  const definition = { execute_url: endpoint, name: "Service", terms: "Declared terms", deadline_seconds: 30,
+    timeout_refund_bps: 10000, malformed_refund_bps: 7500, output_schema: { type: "object", required: ["answer"] } };
+  const fetcher = async () => Response.json({ provider: "0xProvider", agents: [definition] });
+  const registration = { name: "Service", terms: "Declared terms", deadline: "30", timeout: "100", malformed: "75",
+    schema: '{"required":["answer"],"type":"object"}' };
+  await validateRegistrationEndpoint(endpoint, "0xprovider", "https://adapter.example", fetcher, registration);
+  for (const update of [{ schema: "{}" }, { terms: "Different promise" }, { malformed: "0" }, { deadline: "10" }]) {
+    await assert.rejects(validateRegistrationEndpoint(endpoint, "0xprovider", "https://adapter.example", fetcher, { ...registration, ...update }), /exact hosted service/);
+  }
+});

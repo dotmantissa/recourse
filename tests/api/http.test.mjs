@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createServer, request as httpRequest } from "node:http";
 import test from "node:test";
 import { readBody } from "../../api/http-safety.mjs";
+import { AGENT_DEFINITIONS, MANIFEST_HASH } from "../../agents/catalog.mjs";
 
 process.env.AGENT_SIGNING_KEY = "";
 const { fetchWithTimeout, parseObject, server } = await import("../../api/server.mjs");
@@ -32,7 +33,16 @@ test("HTTP rejects non-object payment requests without crashing", async () => {
     const payment = await fetch(`${origin}/x402/request`, { method: "POST", body: "{}" });
     assert.equal(payment.status, 402);
     assert.ok(payment.headers.get("payment-required"));
-    assert.equal((await fetch(`${origin}/`)).status, 200);
+    const root = await (await fetch(`${origin}/`)).json();
+    assert.equal(root.x402_interoperable, false);
+    const catalog = await (await fetch(`${origin}/agents`)).json();
+    assert.equal(catalog.manifest_hash, MANIFEST_HASH);
+    assert.equal(catalog.protocol_version, 2);
+    assert.equal(catalog.agents.length, 5);
+    for (const agent of catalog.agents) {
+      assert.deepEqual(agent.output_schema, AGENT_DEFINITIONS[agent.slug].output_schema);
+      assert.deepEqual(agent.input_schema, AGENT_DEFINITIONS[agent.slug].input_schema);
+    }
     assert.equal((await fetch(`${origin}/health`)).status, 503);
     let lastResponse;
     for (let index = 0; index < 240; index += 1) lastResponse = await fetch(`${origin}/`);

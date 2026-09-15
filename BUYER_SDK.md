@@ -83,7 +83,8 @@ the **same** plan/run ID to retain budgets and pending transactions.
 
 ## Acceptance checks and embedding
 
-The SDK verifies the provider signature and request/output commitments against
+The SDK verifies the provider signature and domain-bound `recourse-request-v3`
+request/output commitments against
 the funded job, independently applies the registered JSON schema, and evaluates
 optional bounded field-equality checks, for example:
 

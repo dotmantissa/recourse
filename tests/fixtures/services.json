@@ -1,0 +1,36 @@
+{
+  "research-sources": {
+    "request": { "query": "distributed consensus" },
+    "output": {
+      "query": "distributed consensus",
+      "sources": [
+        { "title": "Study 1", "url": "https://example.com/1", "citation": "A Researcher (2026). Study 1." },
+        { "title": "Study 2", "url": "https://example.com/2", "citation": "A Researcher (2026). Study 2." },
+        { "title": "Study 3", "url": "https://example.com/3", "citation": "A Researcher (2026). Study 3." },
+        { "title": "Study 4", "url": "https://example.com/4", "citation": "A Researcher (2026). Study 4." },
+        { "title": "Study 5", "url": "https://example.com/5", "citation": "A Researcher (2026). Study 5." }
+      ]
+    },
+    "invalid_path": ["sources", 0, "citation"], "invalid_value": 42
+  },
+  "citation-validator": {
+    "request": { "claim": "This is a claim", "sources": ["https://example.com/page"] },
+    "output": { "claim": "This is a claim", "checks": [{ "url": "https://example.com/page", "reachable": true, "title": "Example", "status": 200 }], "verdict": "all sources reachable" },
+    "invalid_path": ["checks", 0, "status"], "invalid_value": "200"
+  },
+  "json-repair": {
+    "request": { "document": "{\"answer\":\"yes\"}", "required_keys": ["answer", "source"] },
+    "output": { "valid": false, "normalized": { "answer": "yes" }, "missing_keys": ["source"] },
+    "invalid_path": ["missing_keys", 0], "invalid_value": 42
+  },
+  "code-policy": {
+    "request": { "code": "\neval('text');\nfetch('https://example.com');", "language": "javascript" },
+    "output": { "language": "javascript", "score": 72, "findings": [{ "rule": "eval", "severity": "high", "line": 2 }, { "rule": "network-call", "severity": "low", "line": 3 }] },
+    "invalid_path": ["findings", 0, "severity"], "invalid_value": "safe"
+  },
+  "page-brief": {
+    "request": { "url": "https://example.com/page" },
+    "output": { "url": "https://example.com/page", "title": "Example", "excerpt": "Example example consensus consensus", "key_phrases": ["example", "consensus"] },
+    "invalid_path": ["key_phrases", 0], "invalid_value": 42
+  }
+}

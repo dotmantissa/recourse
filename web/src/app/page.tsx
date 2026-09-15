@@ -642,7 +642,7 @@ function JobRequestFields({
     return <Field label="Research question" name="query" value={form.query} onChange={(value) => onChange({ ...form, query: value })} placeholder="What should the source agent investigate?" />;
   }
   if (slug === "citation-validator") {
-    return <><Field label="Claim to check" name="claim" value={form.claim} onChange={(value) => onChange({ ...form, claim: value })} /><label className="field"><span>Public source URLs</span><textarea value={form.sources} onChange={(event) => onChange({ ...form, sources: event.target.value })} placeholder="One URL per line" /></label></>;
+    return <><Field label="Claim context (URLs checked for reachability only)" name="claim" value={form.claim} onChange={(value) => onChange({ ...form, claim: value })} /><label className="field"><span>Public source URLs</span><textarea value={form.sources} onChange={(event) => onChange({ ...form, sources: event.target.value })} placeholder="One URL per line" /></label></>;
   }
   if (slug === "json-repair") {
     return <><label className="field"><span>JSON document</span><textarea value={form.document} onChange={(event) => onChange({ ...form, document: event.target.value })} /></label><Field label="Required keys" name="requiredKeys" value={form.requiredKeys} onChange={(value) => onChange({ ...form, requiredKeys: value })} placeholder="title,url,citation" /></>;
@@ -929,7 +929,7 @@ function PrivyHomeSession() {
     event.preventDefault();
     await action("register", async () => {
       const context = await walletContext();
-      await validateRegistrationEndpoint(registerForm.endpoint, context.address, ADAPTER_URL);
+      await validateRegistrationEndpoint(registerForm.endpoint, context.address, ADAPTER_URL, undefined, registerForm);
       return write(context.address, context.provider, "register_capability", [registerForm.name, registerForm.endpoint, registerForm.terms, BigInt(registerForm.deadline), registerForm.schema, BigInt(registerForm.timeout) * 100n, BigInt(registerForm.malformed) * 100n, parseGen(registerForm.price)], parseGen(registerForm.collateral));
     });
   }

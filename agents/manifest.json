@@ -1,48 +1,150 @@
 {
-  "network": "studio-next",
+  "version": 2,
+  "network": "studio-dev",
   "chain_id": 61997,
   "agents": [
     {
       "slug": "research-sources",
       "name": "Source Scout",
-      "terms": "Return five citable sources for the supplied research question as JSON. Each item must include title, URL, and citation.",
-      "schema": "{\"type\":\"object\",\"required\":[\"query\",\"sources\"],\"properties\":{\"query\":{\"type\":\"string\"},\"sources\":{\"type\":\"array\",\"minItems\":5,\"maxItems\":5}}}",
+      "description": "Returns five Crossref search records with citations. Does not verify that sources support a claim.",
+      "terms": "Query Crossref for the supplied research question and return five indexed records with title, URL, and citation. Search ranking is not independent verification of relevance, source accuracy, or support for a claim.",
+      "input_schema": {
+        "type": "object", "required": ["query"], "additionalProperties": false,
+        "properties": { "query": { "type": "string", "minLength": 3, "maxLength": 240 } }
+      },
+      "output_schema": {
+        "type": "object", "required": ["query", "sources"], "additionalProperties": false,
+        "properties": {
+          "query": { "type": "string", "minLength": 3, "maxLength": 240 },
+          "sources": {
+            "type": "array", "minItems": 5, "maxItems": 5,
+            "items": {
+              "type": "object", "required": ["title", "url", "citation"], "additionalProperties": false,
+              "properties": {
+                "title": { "type": "string", "minLength": 1, "maxLength": 2000 },
+                "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                "citation": { "type": "string", "minLength": 1, "maxLength": 4000 }
+              }
+            }
+          }
+        }
+      },
       "deadline_seconds": 30,
       "timeout_refund_bps": 10000,
       "malformed_refund_bps": 7500
     },
     {
       "slug": "citation-validator",
-      "name": "Citation Auditor",
-      "terms": "Check each supplied public source URL and return reachability, status, title, and an aggregate verdict as JSON.",
-      "schema": "{\"type\":\"object\",\"required\":[\"claim\",\"checks\",\"verdict\"],\"properties\":{\"claim\":{\"type\":\"string\"},\"checks\":{\"type\":\"array\"},\"verdict\":{\"type\":\"string\"}}}",
+      "name": "URL Reachability",
+      "description": "Fetches public URLs and reports HTTP status and page titles. Does not check whether they support the supplied claim.",
+      "terms": "Check each supplied public URL and return reachability, HTTP status, and page title. A status of zero means fetching failed. The verdict summarizes reachability only, not citation accuracy or whether a source supports the supplied claim.",
+      "input_schema": {
+        "type": "object", "required": ["claim", "sources"], "additionalProperties": false,
+        "properties": {
+          "claim": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "sources": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+        }
+      },
+      "output_schema": {
+        "type": "object", "required": ["claim", "checks", "verdict"], "additionalProperties": false,
+        "properties": {
+          "claim": { "type": "string", "minLength": 3, "maxLength": 1000 },
+          "checks": {
+            "type": "array", "minItems": 1, "maxItems": 10,
+            "items": {
+              "type": "object", "required": ["url", "reachable", "title", "status"], "additionalProperties": false,
+              "properties": {
+                "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+                "reachable": { "type": "boolean" },
+                "title": { "type": "string", "maxLength": 180 },
+                "status": { "type": "integer", "minimum": 0, "maximum": 599 }
+              }
+            }
+          },
+          "verdict": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      },
       "deadline_seconds": 30,
       "timeout_refund_bps": 10000,
       "malformed_refund_bps": 7500
     },
     {
       "slug": "json-repair",
-      "name": "Schema Mechanic",
-      "terms": "Validate and normalize the supplied JSON document against the supplied required key list. Never invent missing values.",
-      "schema": "{\"type\":\"object\",\"required\":[\"valid\",\"normalized\",\"missing_keys\"],\"properties\":{\"valid\":{\"type\":\"boolean\"},\"normalized\":{},\"missing_keys\":{\"type\":\"array\"}}}",
+      "name": "JSON Key Checker",
+      "description": "Parses JSON and checks required top-level keys, or keys of the first array object. Does not repair malformed JSON or invent values.",
+      "terms": "Parse a supplied JSON document and check the requested keys on its object or first array object. Preserve parsed values; never invent missing values or repair malformed JSON. Report invalid input and missing keys explicitly. This is not general JSON Schema validation.",
+      "input_schema": {
+        "type": "object", "required": ["document"], "additionalProperties": false,
+        "properties": {
+          "document": {},
+          "required_keys": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 64 } }
+        }
+      },
+      "output_schema": {
+        "type": "object", "required": ["valid", "normalized", "missing_keys"], "additionalProperties": false,
+        "properties": {
+          "valid": { "type": "boolean" },
+          "normalized": {},
+          "missing_keys": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+          "error": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      },
       "deadline_seconds": 15,
       "timeout_refund_bps": 10000,
       "malformed_refund_bps": 7500
     },
     {
       "slug": "code-policy",
-      "name": "Code Sentinel",
-      "terms": "Run the declared static policy checks against the supplied source code and return findings with rule, severity, and line.",
-      "schema": "{\"type\":\"object\",\"required\":[\"language\",\"score\",\"findings\"],\"properties\":{\"language\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\"},\"findings\":{\"type\":\"array\"}}}",
+      "name": "Static Pattern Scan",
+      "description": "Scans text for four declared code patterns. Does not parse code or establish security or correctness.",
+      "terms": "Scan supplied JavaScript, TypeScript, or Python text for eval, shell-exec, secret-access, and network-call regex patterns. Return at most 100 rule, severity, and line findings. Score starts at 100 and subtracts 25 per high, 10 per medium, and 3 per low match, floored at zero, including omitted findings. Comments and strings can match; this is not a parser, security audit, or correctness guarantee.",
+      "input_schema": {
+        "type": "object", "required": ["code", "language"], "additionalProperties": false,
+        "properties": {
+          "code": { "type": "string", "minLength": 1, "maxLength": 20000 },
+          "language": { "type": "string", "enum": ["javascript", "typescript", "python"] }
+        }
+      },
+      "output_schema": {
+        "type": "object", "required": ["language", "score", "findings"], "additionalProperties": false,
+        "properties": {
+          "language": { "type": "string", "enum": ["javascript", "typescript", "python"] },
+          "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "findings": {
+            "type": "array", "maxItems": 100,
+            "items": {
+              "type": "object", "required": ["rule", "severity", "line"], "additionalProperties": false,
+              "properties": {
+                "rule": { "type": "string", "enum": ["eval", "shell-exec", "secret-access", "network-call"] },
+                "severity": { "type": "string", "enum": ["high", "medium", "low"] },
+                "line": { "type": "integer", "minimum": 1, "maximum": 20000 }
+              }
+            }
+          }
+        }
+      },
       "deadline_seconds": 20,
       "timeout_refund_bps": 10000,
       "malformed_refund_bps": 7500
     },
     {
       "slug": "page-brief",
-      "name": "Page Brief",
-      "terms": "Fetch the supplied public page and return a bounded title, excerpt, and key phrase list as JSON.",
-      "schema": "{\"type\":\"object\",\"required\":[\"url\",\"title\",\"excerpt\",\"key_phrases\"],\"properties\":{\"url\":{\"type\":\"string\"},\"title\":{\"type\":\"string\"},\"excerpt\":{\"type\":\"string\"},\"key_phrases\":{\"type\":\"array\"}}}",
+      "name": "Page Excerpt",
+      "description": "Returns a page title, first 900 text characters, and up to eight frequent words. Not an AI summary or fact check.",
+      "terms": "Fetch the supplied public page and strip markup. Return its title (up to 180 characters), first 900 text characters, and up to eight most frequent non-stopword ASCII words longer than four characters. This is extraction, not a semantic summary or factual verification.",
+      "input_schema": {
+        "type": "object", "required": ["url"], "additionalProperties": false,
+        "properties": { "url": { "type": "string", "minLength": 1, "maxLength": 2048 } }
+      },
+      "output_schema": {
+        "type": "object", "required": ["url", "title", "excerpt", "key_phrases"], "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string", "minLength": 1, "maxLength": 2048 },
+          "title": { "type": "string", "maxLength": 180 },
+          "excerpt": { "type": "string", "maxLength": 900 },
+          "key_phrases": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 5, "maxLength": 65536 } }
+        }
+      },
       "deadline_seconds": 30,
       "timeout_refund_bps": 10000,
       "malformed_refund_bps": 7500

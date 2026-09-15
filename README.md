@@ -51,8 +51,8 @@ the buyer's claim. Its default terms are:
 
 ## GenLayer boundary
 
-The browser and HTTP adapter own authentication, request construction, x402
-compatibility, evidence storage, and presentation. The intelligent contract
+The browser and HTTP adapter own authentication, request construction, native
+GEN escrow-intent checks, evidence storage, and presentation. The intelligent contract
 owns the capability terms, escrow, receipt/evidence commitments, dispute
 decision, settlement effect, and reputation record. Validators fetch the
 public evidence themselves; no browser-provided verdict is trusted.
@@ -73,7 +73,7 @@ the connected chain is not `61997`.
 The contract uses the Studio Next template's pinned GenVM runner dependency. It stores structured state
 as canonical JSON strings inside GenLayer `TreeMap` and `DynArray` fields.
 Objective evidence is normalized with `strict_eq`; semantic disputes use
-`run_nondet_unsafe` and compare only stable fields:
+`run_nondet` and compare only stable fields:
 
 - `decision`
 - `refund_bps`
@@ -81,13 +81,14 @@ Objective evidence is normalized with `strict_eq`; semantic disputes use
 
 ## Local setup
 
-Use Python 3.10+ and Node 20.18.1+ (required by the HTTP transport).
+Use Python 3.12 and Node 20.18.1+ (required by the HTTP transport).
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e '.[dev]'
-npm install
-npm --prefix web install
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+npm ci
+npm --prefix web ci
+npm run setup:contracts
 ```
 
 ### Adapter and RPC safety checks
@@ -249,21 +250,37 @@ timeouts, permissionless full-refund recovery, and the buyer challenge cutoff.
 The adapter exposes five bounded service agents. They use real public inputs
 and return real results; they are not seeded or mocked responses:
 
-- `research-sources`: queries Crossref and returns five citable sources.
-- `citation-validator`: fetches submitted URLs and reports reachability.
-- `json-repair`: validates a JSON document against required keys.
-- `code-policy`: runs bounded static policy checks on source code.
-- `page-brief`: fetches a public page and returns a title, excerpt, and key
-  phrases.
+- `research-sources`: returns five Crossref search records, not verified claim support.
+- `citation-validator`: reports URL reachability and titles, not citation entailment.
+- `json-repair`: parses JSON and checks object keys; it does not repair JSON or validate arbitrary schemas.
+- `code-policy`: reports four regex patterns and their declared score, not a security verdict.
+- `page-brief`: returns a title, text prefix, and frequent words, not an AI summary.
 
-The capability definitions are recorded in `agents/manifest.json`. After the
-adapter is publicly deployed, register them on Studio Next with:
+`agents/manifest.json` is the single definition of service names, limitations,
+terms, input schemas, nested output schemas, deadlines, and refund policies.
+The API publishes these definitions and their digest at `/agents`. It rejects
+invalid inputs and incompatible hosted listing terms before accepting work.
+Contract settlement independently enforces nested output schemas; provider
+assertions are not sufficient. Offline tests execute all five implementations
+with mocked upstream HTTP and exercise valid/malformed onchain settlement logic.
+These tests do not demonstrate live upstream availability or recipient payments.
+
+Registration defaults to an offline plan. Configure `CONTRACT_ADDRESS`,
+`AGENT_SIGNING_KEY`, `RECOURSE_ADAPTER_URL`, price/collateral, and an explicit
+`REGISTRATION_MAX_FEE_WEI`, then inspect the plan before adding `--run`:
 
 ```bash
-RECOURSE_ADAPTER_URL=https://your-adapter.onrender.com \
-DEPLOYER_KEY=0x... \
 npm run register:agents
+npm run register:agents -- --run
 ```
+
+Registration checks the hosted signer, deployment, and manifest hash, scans
+finalized capability pages, and refuses conflicting listings or excessive fees.
+It holds a local lock under `.runtime/registrations/` through the complete run.
+An interrupted/failed run leaves that lock: reconcile any submitted transaction
+and finalized listings before manually removing it. It never silently retries
+an uncertain registration. Fees may total five times the per-registration cap;
+the plan shows the maximum total collateral separately.
 
 The opt-in autonomous buyer CLI and SDK are documented in `BUYER_SDK.md`.
 They enforce an explicit capability allowlist, gross spending/fee caps, public
@@ -274,7 +291,7 @@ execution with `--run`. Live multi-validator and payout acceptance remain open.
 An autonomous buyer uses its own Studio Next signer. Privy is the
 embedded-wallet and authentication layer for the browser app; it is not a
 server-side agent credential. The buyer reads `get_capabilities`, creates the
-exact request and a fresh nonce, computes the `recourse-request-v2` SHA-256
+exact request and a fresh nonce, computes the domain-bound `recourse-request-v3` SHA-256
 commitment, signs `create_job` with the capability's exact `price_wei`, and
 waits for the resulting job to be readable before executing it.
 
@@ -306,9 +323,9 @@ configured, to the repository's separate `evidence` branch. A server-side
 agent normally uses the result returned by its execution POST; the
 authenticated `GET /results/:job_id` route is the browser recovery path and
 requires a Privy access token plus a wallet signature over the job-specific
-access message. The `/x402/request` endpoint is a native-GEN compatibility
-handshake: it verifies that a matching onchain escrow exists, but it is not a
-cross-chain stablecoin bridge or a fabricated payment attestation. All
+access message. `/x402/request` is a legacy route name for Recourse's proprietary
+native-GEN escrow-intent check. It is **not interoperable x402**, a facilitator,
+or a cross-chain stablecoin bridge. All
 contract and payment operations remain on Studio Next / chain `61997`.
 
 Execution is idempotent for a committed request. If an agent loses the HTTP
@@ -317,7 +334,7 @@ capability POST with the original job ID, request, label, and nonce. The
 adapter verifies the commitment and returns the encrypted stored delivery
 without rerunning the provider capability.
 
-After funding a job, the x402 compatibility route accepts a JSON or
+After funding a job, the native escrow-intent route accepts a JSON or
 base64-encoded JSON `x-payment` envelope:
 
 ```json
