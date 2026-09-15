@@ -121,6 +121,9 @@ def test_evidence_is_permissionless_immutable_and_cached(scenario, direct_vm, di
     with direct_vm.expect_revert("immutable"):
         contract.publish_evidence(job_id, url + "-changed")
     set_time(direct_vm, "2026-01-01T00:08:00+00:00")
+    with direct_vm.expect_revert("challenge window"):
+        contract.settle_job(job_id)
+    set_time(direct_vm, "2026-01-01T00:36:00+00:00")
     contract.settle_job(job_id)
     assert json.loads(contract.get_job(job_id))["outcome"] == "success"
 
@@ -151,7 +154,7 @@ def test_every_partial_payout_protects_buyer_challenge(direct_vm, direct_deploy,
     if refund < 10000:
         with direct_vm.expect_revert("challenge window"):
             contract.settle_job(job_id)
-        set_time(direct_vm, "2026-01-01T00:08:00+00:00")
+        set_time(direct_vm, "2026-01-01T00:36:00+00:00")
     transfers = []
 
     def capture_transfer(vm, request):
@@ -169,6 +172,11 @@ def test_every_partial_payout_protects_buyer_challenge(direct_vm, direct_deploy,
     assert {item["address"].as_bytes: item["value"] for item in transfers} == expected
     assert all(item["on"] == "finalized" for item in transfers)
     assert sum(item["value"] for item in transfers) == PRICE
+    reputation = json.loads(contract.get_reputation(json.loads(contract.get_job(job_id))["provider"]))
+    assert reputation["settled_wei"] == PRICE
+    assert reputation["refunded_wei"] == PRICE * refund // 10000
+    assert reputation["provider_paid_wei"] == PRICE - PRICE * refund // 10000
+    assert reputation["jobs"] == 1
     with direct_vm.expect_revert("not ready"):
         contract.settle_job(job_id)
     assert len(transfers) == len(expected)

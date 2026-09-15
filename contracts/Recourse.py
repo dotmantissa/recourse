@@ -25,7 +25,7 @@ DISPUTE_RESOLVED = "resolved"
 ALLOWED_RECEIPT_STATUS = ("success", "timeout", "malformed")
 ALLOWED_DISPUTE_TYPES = ("quality", "terms")
 ALLOWED_DECISIONS = ("release", "partial_refund", "full_refund")
-CHALLENGE_WINDOW_SECONDS = 120
+CHALLENGE_WINDOW_SECONDS = 1800
 ACCEPTANCE_WINDOW_SECONDS = 1800
 EXECUTION_START_GRACE_SECONDS = 300
 RECEIPT_GRACE_SECONDS = 300
@@ -200,21 +200,25 @@ class Recourse(gl.contract.Contract):
             "breached_jobs": 0,
             "disputed_jobs": 0,
             "refunded_wei": 0,
+            "settled_wei": 0,
+            "provider_paid_wei": 0,
             "reliability_bps": 0,
         }
 
     def _record_reputation(
-        self, provider: str, refund_bps: int, payout_wei: int, disputed: bool
+        self, provider: str, refund_bps: int, refund_wei: int, disputed: bool, escrow_wei: int
     ) -> None:
         record = self._provider_reputation(provider)
         record["jobs"] = int(record["jobs"]) + 1
+        record["settled_wei"] = int(record.get("settled_wei", 0)) + escrow_wei
+        record["provider_paid_wei"] = int(record.get("provider_paid_wei", 0)) + escrow_wei - refund_wei
         if disputed:
             record["disputed_jobs"] = int(record["disputed_jobs"]) + 1
         if refund_bps == 0:
             record["successful_jobs"] = int(record["successful_jobs"]) + 1
         else:
             record["breached_jobs"] = int(record["breached_jobs"]) + 1
-            record["refunded_wei"] = int(record["refunded_wei"]) + int(payout_wei)
+            record["refunded_wei"] = int(record["refunded_wei"]) + refund_wei
         record["reliability_bps"] = int(record["successful_jobs"]) * 10000 // int(record["jobs"])
         self.reputation[provider] = json.dumps(record, sort_keys=True)
 
@@ -511,6 +515,7 @@ Buyer complaint:
             int(refund_bps),
             int(refund),
             bool(dispute_id),
+            int(amount),
         )
         if refund > 0:
             self._send_value(self._address(str(job["buyer"])), u256(refund))

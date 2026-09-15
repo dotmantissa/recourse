@@ -34,7 +34,7 @@ the packet; `get_evidence` returns the complete record.
 | Accepted by provider | 5-minute start/finality allowance plus service deadline | Execution must finish within this window |
 | Receipt publication | 5 minutes after execution deadline | Permissionless full refund if missing; buyer may instead claim configured timeout compensation |
 | Evidence publication | 10 minutes after receipt submission | Permissionless full refund if missing, even when disputed |
-| Buyer challenge | 2 minutes after evidence publication | Non-buyers cannot settle any less-than-full refund before expiry |
+| Buyer challenge | 30 minutes after evidence publication | Non-buyers cannot settle any less-than-full refund before expiry |
 | Dispute resolution | 30 minutes after dispute opens | Permissionless full refund if adjudication has not resolved |
 
 Receipt and evidence publication close at their deadlines; recovery opens at
