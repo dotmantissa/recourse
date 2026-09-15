@@ -92,6 +92,8 @@ export type Reputation = {
   breached_jobs: number;
   disputed_jobs: number;
   refunded_wei: number | string;
+  settled_wei?: number | string;
+  provider_paid_wei?: number | string;
   reliability_bps: number;
 };
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import {
   ArrowDownRight,
@@ -30,7 +30,6 @@ import {
   ShieldCheck,
   Sparkles,
   WalletCards,
-  X,
 } from "lucide-react";
 import {
   ADAPTER_URL,
@@ -67,6 +66,8 @@ import {
 import type { Capability, CapabilityRequest, Job, JobResult, Reputation } from "@/lib/types";
 import { clearPendingRequest, clearSessionInputs, loadRequestContext, recoverPendingRequestContexts, savePendingRequest, saveRequestContext } from "@/lib/request-store";
 import { validateRegistrationEndpoint } from "@/lib/provider";
+import { ModalShell } from "@/components/modal-shell";
+import { ProviderHistory } from "@/components/provider-history";
 import { canDispute, recoveryReady } from "@/lib/lifecycle";
 import type { FeeQuote, PendingTransaction } from "@/lib/transactions";
 
@@ -145,66 +146,6 @@ const defaultJobForm = {
   raw: "{}",
 };
 
-function ModalShell({
-  title,
-  eyebrow,
-  onClose,
-  children,
-}: {
-  title: string;
-  eyebrow: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId = useId();
-  const closeRef = useRef(onClose);
-  useEffect(() => { closeRef.current = onClose; }, [onClose]);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const dialog = dialogRef.current;
-    const selector = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]';
-    dialog?.querySelector<HTMLElement>(selector)?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current();
-      }
-      if (event.key !== "Tab") return;
-      const targets = Array.from(dialog?.querySelectorAll<HTMLElement>(selector) ?? []);
-      const first = targets[0];
-      const last = targets.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previous?.focus();
-    };
-  }, []);
-  return (
-    <div className="modal-backdrop">
-      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <div className="modal-head">
-          <div>
-            <span className="eyebrow">{eyebrow}</span>
-            <h2 id={titleId}>{title}</h2>
-          </div>
-          <button className="icon-button" aria-label="Close dialog" title="Close dialog" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
 
 function Field({
   label,
@@ -278,6 +219,7 @@ function CapabilitySpecimen({
       </div>
       <p className="specimen-provider"><span className="provider-dot" /> {shortAddress(capability.provider)} <span>publishes</span> {capability.endpoint}</p>
       <p className="specimen-terms">{capability.terms}</p>
+      <ProviderHistory provider={capability.provider} />
       <details className="specimen-schema">
         <summary>Required output schema</summary>
         <pre><code>{capability.output_schema}</code></pre>
@@ -393,7 +335,7 @@ function Guide() {
             <li><strong>Back it.</strong> Deposit collateral that covers the request price.</li>
             <li><strong>Execute.</strong> Return the result and sign the canonical receipt with your wallet.</li>
             <li><strong>Expose evidence.</strong> Give the monitor a public JSON packet that validators can fetch.</li>
-            <li><strong>Build trust.</strong> Settlements update your reliability record onchain.</li>
+            <li><strong>Build a record.</strong> Settlements update public address-level history, not a verified trust score.</li>
           </ol>
         </div>
       </div>
@@ -820,7 +762,6 @@ function PrivyHomeSession() {
     try {
       return await submitChainWrite(wallet, provider, method, args, value, recipients, (quote) => {
         if (feeApproval.current) throw new Error("Another fee approval is already open.");
-        setModal("none");
         setFeeQuote({ ...quote, wallet });
         return new Promise<boolean>((resolve) => {
           approval.resolve = resolve;
@@ -1326,8 +1267,8 @@ function PrivyHomeSession() {
           <section className="lower-grid">
             <article className="reputation-block">
               <div className="section-marker"><span>04</span><span>provider signal</span></div>
-              <div className="reputation-orbit"><div className="orbit-track" /><div className="orbit-core"><span>{reputation ? bps(reputation.reliability_bps) : "—"}</span><small>reliability</small></div><span className="orbit-satellite sat-a" /><span className="orbit-satellite sat-b" /></div>
-              <div className="reputation-copy"><h2>Trust is<br /><em>earned in public.</em></h2><p>{reputation ? `${reputation.jobs} jobs observed · ${reputation.disputed_jobs} disputed · ${formatGen(reputation.refunded_wei)} returned.` : "Connect your embedded wallet to see how the rail records provider performance."}</p></div>
+              <div className="reputation-orbit"><div className="orbit-track" /><div className="orbit-core"><span>{reputation?.jobs ? bps(reputation.reliability_bps) : "Unrated"}</span><small>no-refund share</small></div><span className="orbit-satellite sat-a" /><span className="orbit-satellite sat-b" /></div>
+              <div className="reputation-copy"><h2>History is<br /><em>recorded in public.</em></h2><p>{reputation ? `${reputation.jobs} settled jobs · ${reputation.disputed_jobs} disputed · ${formatGen(reputation.settled_wei ?? 0)} exposure · ${formatGen(reputation.refunded_wei)} returned.` : "Connect your wallet to inspect its provider settlement history."}</p><p>Unweighted settlement counts, not a verified identity or trust guarantee. New addresses and self-dealing can distort the record.</p></div>
             </article>
             <article className="dispute-block">
               <div className="section-marker"><span>05</span><span>onchain justice</span></div>

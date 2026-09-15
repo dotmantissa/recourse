@@ -744,7 +744,8 @@ em { color: var(--acid); font-style: normal; }
 .dashboard-view > .pagination-bar { padding-top: 20px; }
 .logout-confirm p { color: #697067; font-size: 13px; line-height: 1.6; max-width: 500px; }
 
-.modal-backdrop { align-items: center; background: rgba(5, 6, 5, .8); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 20; }
+.modal-backdrop { align-items: center; background: rgba(5, 6, 5, .8); border: 0; display: flex; height: 100dvh; inset: 0; justify-content: center; margin: 0; max-height: none; max-width: none; padding: 20px; position: fixed; width: 100vw; z-index: 20; }
+.modal-backdrop:not([open]) { display: none; }
 .modal { background: var(--paper); box-shadow: var(--shadow); color: var(--ink); max-height: calc(100vh - 40px); max-width: 680px; overflow: auto; padding: 28px; width: 100%; }
 .modal-head { align-items: start; border-bottom: 1px solid var(--line-dark); display: flex; justify-content: space-between; margin-bottom: 24px; padding-bottom: 20px; }
 .modal .eyebrow { color: #607d00; }
