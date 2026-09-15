@@ -5,6 +5,7 @@ import { config } from "dotenv";
 import { createAccount, createClient, isSuccessful } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 import { describeContract, verifyDeployment } from "../sdk/deployment.mjs";
+import { retryRpcRead } from "../sdk/rpc-read.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 config({ path: resolve(root, ".env"), quiet: true });
@@ -20,7 +21,8 @@ if (!runner || runner.includes(":latest") || runner.includes(":test")) {
 }
 const description = describeContract(source);
 const args = process.argv.slice(2);
-if (args.some((arg) => arg !== "--run")) throw new Error("Usage: npm run deploy:studio-next -- [--run]");
+if (args.some((arg) => !["--run", "--promote"].includes(arg))) throw new Error("Usage: npm run deploy:studio-next -- [--run] [--promote]");
+if (args.includes("--promote") && !args.includes("--run")) throw new Error("--promote requires --run and verified deployment");
 if (!args.includes("--run")) {
   console.log(JSON.stringify({ mode: "dry-run", chainId: EXPECTED_CHAIN_ID, runner, ...description,
     maximumFeeWei: process.env.DEPLOYMENT_MAX_FEE_WEI || null }, null, 2));
@@ -67,13 +69,13 @@ const txHash = await client.deployContract({
 const checkpoint = await open(lock, "a");
 try { await checkpoint.writeFile(`${JSON.stringify({ status: "submitted", hash: txHash })}\n`); await checkpoint.sync(); } finally { await checkpoint.close(); }
 console.log(`Deployment transaction: ${txHash}`);
-const receipt = await client.waitForTransactionReceipt({
+const receipt = await retryRpcRead(() => client.waitForTransactionReceipt({
   hash: txHash,
   waitUntil: "finalized",
   interval: 3000,
   retries: 240,
   fullTransaction: true,
-});
+}));
 if (!isSuccessful(receipt)) {
   throw new Error(`Deployment finalized with execution failure: ${JSON.stringify(receipt)}`);
 }
@@ -92,7 +94,7 @@ if (!address) {
   throw new Error("Deployment receipt did not contain a contract address");
 }
 
-const verified = await verifyDeployment({ client, address, source });
+const verified = await retryRpcRead(() => verifyDeployment({ client, address, source }));
 
 const metadata = {
   network: "studio-dev",
@@ -142,5 +144,12 @@ await updateEnv(resolve(root, "web/.env.local"), {
   NEXT_PUBLIC_RECOURSE_CHAIN_ID: String(EXPECTED_CHAIN_ID),
   NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS: address,
 });
+if (args.includes("--promote")) {
+  const release = { schemaVersion: 1, protocolVersion: 2, chainId: EXPECTED_CHAIN_ID,
+    contractAddress: address, rpc: RPC, sourceSha256: verified.sourceSha256, deploymentTransaction: txHash };
+  const temporary = resolve(root, "deploy/release.json.tmp");
+  await writeFile(temporary, `${JSON.stringify(release, null, 2)}\n`);
+  await rename(temporary, resolve(root, "deploy/release.json"));
+}
 await rm(lock);
 console.log(`Recourse deployed at ${address}`);
