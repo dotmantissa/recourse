@@ -149,6 +149,13 @@ failed RPC response can never incur an additional transaction fee.
 
 ### Deployment isolation and result verification
 
+The `evidence` Git branch is the adapter's durable data store, not a feature or
+release branch. It retains public evidence packets plus encrypted results and
+execution/recovery checkpoints. `main` contains application code. Do not merge,
+force-push, or delete `evidence` during a release: historical evidence URLs and
+pending execution recovery depend on its records. Never store plaintext secrets
+or private requests there.
+
 Evidence and encrypted results are stored under `<chain-id>-<contract-address>/`.
 New evidence URLs include that scope. Historical unscoped evidence URLs remain
 read-only and continue to address the original files; they never resolve to a new
@@ -189,12 +196,17 @@ pushing or switching a live environment.
 ```bash
 npm run deploy:studio-next
 # Configure DEPLOYER_KEY and DEPLOYMENT_MAX_FEE_WEI locally before authorizing:
-npm run deploy:studio-next -- --run
+npm run deploy:studio-next -- --run --promote
 npm run verify:studio-next
 npm run preflight:release
 ```
 
 Never place a private key in source control or in a `NEXT_PUBLIC_*` variable.
+
+Backend and frontend select the verified `deploy/release.json` deployment by
+default, ignoring stale cloud address variables. `--promote` writes this public
+manifest only after source/schema/finality verification. See `RELEASE.md` for
+explicit preview environment overrides and coordinated production rollout.
 
 ## Operational checks
 
@@ -267,8 +279,8 @@ assertions are not sufficient. Offline tests execute all five implementations
 with mocked upstream HTTP and exercise valid/malformed onchain settlement logic.
 These tests do not demonstrate live upstream availability or recipient payments.
 
-Registration defaults to an offline plan. Configure `CONTRACT_ADDRESS`,
-`AGENT_SIGNING_KEY`, `RECOURSE_ADAPTER_URL`, price/collateral, and an explicit
+Registration defaults to an offline plan using the same release manifest.
+Configure `AGENT_SIGNING_KEY`, `RECOURSE_ADAPTER_URL`, price/collateral, and an explicit
 `REGISTRATION_MAX_FEE_WEI`, then inspect the plan before adding `--run`:
 
 ```bash

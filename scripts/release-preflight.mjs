@@ -12,9 +12,10 @@ const args = process.argv.slice(2);
 if (args.some((arg) => arg !== "--live")) throw new Error("Usage: npm run preflight:release -- [--live]. All checks are read-only.");
 const source = await readFile(resolve(root, "contracts/Recourse.py"), "utf8");
 const metadata = JSON.parse(await readFile(resolve(root, "deploy/addresses.json"), "utf8"));
+const releaseManifest = JSON.parse(await readFile(resolve(root, "deploy/release.json"), "utf8"));
 const backend = { ...parse(await readFile(resolve(root, ".env"))), ...process.env };
 const frontend = parse(await readFile(resolve(root, "web/.env.local")));
-const release = validateReleaseConfiguration({ backend, frontend, metadata, source });
+const release = validateReleaseConfiguration({ backend, frontend, metadata, source, releaseManifest });
 let live;
 if (args.includes("--live")) {
   await verifyDeployment({ client: createClient({ chain: studioDevnet, endpoint: release.rpc }), address: release.contractAddress, source, recordedHash: metadata.sourceSha256 });

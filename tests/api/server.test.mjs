@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import releaseManifest from "../../deploy/release.json" with { type: "json" };
 
 import {
   assertPublicUrl,
@@ -155,7 +156,7 @@ test("x-payment accepts JSON or base64 JSON and must match the funded job", () =
   const envelope = {
     ...requirement,
     amount: "10",
-    contract_address: "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35",
+    contract_address: releaseManifest.contractAddress,
     capability_id: "2",
     job_id: "7",
   };
@@ -165,6 +166,8 @@ test("x-payment accepts JSON or base64 JSON and must match the funded job", () =
     envelope,
   );
   assert.equal(parsePaymentEnvelope("not-json"), null);
+  assert.equal(paymentEnvelopeMatches({ ...envelope, contract_address: "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35" },
+    requirement, { job_id: "7", capability_id: "2" }, { price_wei: "10" }), false);
   assert.equal(
     paymentEnvelopeMatches(
       envelope,

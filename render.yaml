@@ -19,8 +19,8 @@ services:
         generateValue: true
       - key: FRONTEND_ORIGIN
         value: https://recourse-gamma.vercel.app
-      - key: RECOURSE_CONTRACT_ADDRESS
-        sync: false
+      - key: RECOURSE_DEPLOYMENT_MODE
+        value: release
       - key: STUDIO_DEV_RPC
         value: https://studio-dev.genlayer.com/api
       - key: REQUEST_PRICE_WEI

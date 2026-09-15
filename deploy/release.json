@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 2,
+  "chainId": 61997,
+  "contractAddress": "0x58ffB067A2dee35B81f5fBED66969484c98b6975",
+  "rpc": "https://studio-dev.genlayer.com/api",
+  "sourceSha256": "44f9b4559007bd4d92eb75c2bf1c2ed8ceb042145679b7feee67c75b0b5b6503",
+  "deploymentTransaction": "0xbf40e7f2a4009acf1acf932155ade55c81705e8c88a6d481c0c4cd86e6e35ba8"
+}

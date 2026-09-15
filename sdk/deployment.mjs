@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import JSONbig from "json-bigint";
 import { TransactionHashVariant } from "genlayer-js/types";
+import { selectReleaseDeployment } from "./release-config.mjs";
 
 export const RELEASE_CHAIN_ID = 61997;
 export const PROTOCOL_VERSION = 2;
@@ -27,24 +28,28 @@ export async function verifyDeployment({ client, address, source, recordedHash }
   return { chainId: RELEASE_CHAIN_ID, protocolVersion: PROTOCOL_VERSION, contractAddress: address.toLowerCase(), ...expected, counts };
 }
 
-export function validateReleaseConfiguration({ backend, frontend, metadata, source }) {
+export function validateReleaseConfiguration({ backend, frontend, metadata, source, releaseManifest }) {
   const expected = describeContract(source);
   const address = metadata.contractAddress?.toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(address ?? "") || metadata.chainId !== RELEASE_CHAIN_ID || metadata.sourceSha256 !== expected.sourceSha256) throw new Error("Deployment metadata does not match the current contract and chain");
-  for (const [field, value] of Object.entries({ CONTRACT_ADDRESS: backend.CONTRACT_ADDRESS,
-    RECOURSE_CONTRACT_ADDRESS: backend.RECOURSE_CONTRACT_ADDRESS, NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS: frontend.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS })) {
-    if (value?.toLowerCase() !== address) throw new Error(`${field} must explicitly match the recorded deployment`);
-  }
-  if (Number(frontend.NEXT_PUBLIC_RECOURSE_CHAIN_ID) !== RELEASE_CHAIN_ID) throw new Error("Frontend chain differs from the release chain");
   const rpc = metadata.rpc;
-  if (!rpc || backend.STUDIO_DEV_RPC !== rpc || frontend.NEXT_PUBLIC_RECOURSE_RPC !== rpc || new URL(rpc).protocol !== "https:") throw new Error("RPC configuration differs across the release");
+  const backendDeployment = selectReleaseDeployment(releaseManifest, { mode: backend.RECOURSE_DEPLOYMENT_MODE,
+    contractAddress: backend.RECOURSE_CONTRACT_ADDRESS, chainId: backend.STUDIO_DEV_CHAIN_ID, rpc: backend.STUDIO_DEV_RPC });
+  const frontendDeployment = selectReleaseDeployment(releaseManifest, { mode: frontend.NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE,
+    contractAddress: frontend.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS, chainId: frontend.NEXT_PUBLIC_RECOURSE_CHAIN_ID, rpc: frontend.NEXT_PUBLIC_RECOURSE_RPC });
+  for (const deployment of [backendDeployment, frontendDeployment]) {
+    if (deployment.contractAddress !== address || deployment.rpc !== rpc || deployment.sourceSha256 !== expected.sourceSha256) {
+      throw new Error("Effective deployment differs from the recorded release");
+    }
+  }
   const adapter = backend.PUBLIC_BASE_URL?.replace(/\/+$/, "");
   if (!adapter || new URL(adapter).protocol !== "https:" || new URL(adapter).origin !== adapter
     || backend.RECOURSE_ADAPTER_URL?.replace(/\/+$/, "") !== adapter
     || frontend.NEXT_PUBLIC_RECOURSE_ADAPTER_URL?.replace(/\/+$/, "") !== adapter) throw new Error("Adapter origin differs across the release");
   const frontendOrigin = backend.FRONTEND_ORIGIN?.replace(/\/+$/, "");
   if (!frontendOrigin || new URL(frontendOrigin).protocol !== "https:" || new URL(frontendOrigin).origin !== frontendOrigin) throw new Error("An explicit HTTPS frontend origin is required");
-  return { chainId: RELEASE_CHAIN_ID, protocolVersion: PROTOCOL_VERSION, contractAddress: address, rpc, adapter, frontendOrigin, sourceSha256: expected.sourceSha256 };
+  return { chainId: RELEASE_CHAIN_ID, protocolVersion: PROTOCOL_VERSION, contractAddress: address, rpc, adapter, frontendOrigin, sourceSha256: expected.sourceSha256,
+    backendConfigurationSource: backendDeployment.configurationSource, frontendConfigurationSource: frontendDeployment.configurationSource };
 }
 
 export async function verifyHostedRelease({ release, manifestHash, fetcher }) {
@@ -62,6 +67,7 @@ export async function verifyHostedRelease({ release, manifestHash, fetcher }) {
       throw new Error("Hosted frontend/backend deployment identity or catalog is stale");
     }
   }
+  if ([health, frontend].some(identity => identity.source_sha256 !== release.sourceSha256)) throw new Error("Hosted source identity differs from the release");
   if (frontend.adapter_url?.replace(/\/+$/, "") !== release.adapter || !health.ok || health.readiness !== "dependencies_verified"
     || !/^0x[0-9a-f]{40}$/i.test(adapter.provider ?? "")) throw new Error("Hosted provider, adapter URL, or configuration health is invalid");
   return { configurationConsistent: true, provider: adapter.provider, liveAcceptanceComplete: false };

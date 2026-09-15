@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { RPC_URL } from "@/lib/config";
 
-const RPC_URL = process.env.RECOURSE_RPC ?? "https://studio-dev.genlayer.com/api";
 const ALLOWED_METHODS = new Set([
   "eth_chainId", "eth_getBalance", "eth_getTransactionCount", "eth_getTransactionReceipt",
   "eth_getTransactionByHash", "eth_gasPrice", "eth_estimateGas", "eth_sendRawTransaction",

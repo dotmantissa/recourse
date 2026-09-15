@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { MANIFEST_HASH } from "../../agents/catalog.mjs";
+import releaseManifest from "../../deploy/release.json" with { type: "json" };
 
 const execute = promisify(execFile);
 
@@ -20,6 +21,7 @@ test("registration prints an offline manifest plan without signing or networking
   const plan = JSON.parse(stdout);
   assert.equal(plan.mode, "dry-run");
   assert.equal(plan.manifest_hash, MANIFEST_HASH);
+  assert.equal(plan.contract_address, releaseManifest.contractAddress.toLowerCase());
   assert.equal(plan.agents.length, 5);
   assert.ok(plan.agents.every((agent) => agent.input_schema && agent.output_schema));
   await assert.rejects(execute(process.execPath, [...command, "--run"], options), /AGENT_SIGNING_KEY must/);

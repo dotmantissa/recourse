@@ -12,7 +12,7 @@ function loadRoute(fetchResponse, timeoutMs) {
   const exports = {};
   runInNewContext(compiled, {
     exports,
-    require: createRequire(import.meta.url),
+    require: (name) => name === "@/lib/config" ? { RPC_URL: "https://studio-dev.genlayer.com/api" } : createRequire(import.meta.url)(name),
     process: { env: {} },
     Buffer,
     AbortSignal: timeoutMs ? { any: AbortSignal.any, timeout: () => AbortSignal.timeout(timeoutMs) } : AbortSignal,

@@ -15,6 +15,8 @@ import { createGithubStateStore } from "./github-state-store.mjs";
 import { maintenanceAction, runMaintenance } from "./maintenance.mjs";
 import { createReadiness, createStorageProbe } from "./readiness.mjs";
 import { verifyDeployment } from "../sdk/deployment.mjs";
+import releaseManifest from "../deploy/release.json" with { type: "json" };
+import { selectReleaseDeployment } from "../sdk/release-config.mjs";
 import {
   HttpError, assertPublicUrl, createWorkLimiter, fetchPublicUrl, fetchWithTimeout,
   parseId, parseObject, privateIp, publicUrl, readBody, readTextLimited,
@@ -43,14 +45,14 @@ const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY || "dotmantissa/recourse
 const GITHUB_EVIDENCE_BRANCH = process.env.GITHUB_EVIDENCE_BRANCH || "evidence";
 const REQUEST_PRICE_WEI = process.env.REQUEST_PRICE_WEI || "2000000000000000000";
 const AGENT_SIGNING_KEY = process.env.AGENT_SIGNING_KEY || "";
-const CONTRACT_ADDRESS =
-  process.env.RECOURSE_CONTRACT_ADDRESS ||
-  "0x51eDCf8f3Bdbb69a6e83b1cA5076a77C2E5Cdc35";
-const CHAIN_ID = 61997;
+const selectedDeployment = selectReleaseDeployment(releaseManifest, { mode: process.env.RECOURSE_DEPLOYMENT_MODE,
+  contractAddress: process.env.RECOURSE_CONTRACT_ADDRESS, chainId: process.env.STUDIO_DEV_CHAIN_ID, rpc: process.env.STUDIO_DEV_RPC });
+const CONTRACT_ADDRESS = selectedDeployment.contractAddress;
+const CHAIN_ID = selectedDeployment.chainId;
 const STORAGE_SCOPE = deploymentScope(CHAIN_ID, CONTRACT_ADDRESS);
 const EVIDENCE_DIR = resolve(EVIDENCE_ROOT, STORAGE_SCOPE);
 const RESULT_DIR = resolve(RESULT_ROOT, STORAGE_SCOPE);
-const RPC_URL = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
+const RPC_URL = selectedDeployment.rpc;
 const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 const PRIVY_APP_ID = process.env.PRIVY_APP_ID || "";
 const PRIVY_APP_SECRET = process.env.PRIVY_APP_SECRET || "";
@@ -788,7 +790,7 @@ const readiness = createReadiness({ checks: {
   contract: async () => {
     requireRuntimeConfiguration();
     await verifyDeployment({ client: getChainClient(), address: CONTRACT_ADDRESS,
-      source: await readFile(new URL("../contracts/Recourse.py", import.meta.url), "utf8") });
+      source: await readFile(new URL("../contracts/Recourse.py", import.meta.url), "utf8"), recordedHash: selectedDeployment.sourceSha256 });
   },
   durable_storage: async () => { requireRuntimeConfiguration(); await checkStorage(); },
   authentication: async () => { requireRuntimeConfiguration(); await getPrivyClient().users().list({ limit: 1 }, { timeout: 8000, maxRetries: 0 }); },
@@ -890,6 +892,7 @@ async function handleRequest(request, response) {
     const report = await readiness();
     return json(response, report.ok ? 200 : 503, { ...report, chain_id: CHAIN_ID, protocol_version: 2,
       contract_address: CONTRACT_ADDRESS, manifest_hash: MANIFEST_HASH, rpc_url: RPC_URL,
+      configuration_source: selectedDeployment.configurationSource, source_sha256: selectedDeployment.sourceSha256,
       provider: agentAccount?.address ?? null, liveAcceptanceComplete: false }, publicCors);
   }
 

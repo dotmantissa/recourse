@@ -60,6 +60,25 @@ test("provider controls and history do not imply verified trust", async ({ page 
   await expect(page.getByRole("dialog", { name: "Owned service", exact: true })).toBeVisible();
 });
 
+test("users can list an independent capability with explicit collateral and fee approval", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Register a capability", exact: true }).click();
+  const registration = page.getByRole("dialog", { name: "Register a capability", exact: true });
+  await registration.getByLabel("Capability name").fill("My independent service");
+  await registration.getByLabel("Public endpoint").fill("https://independent.example/execute");
+  await registration.getByLabel("Terms", { exact: true }).fill("Return a JSON response within thirty seconds.");
+  await registration.getByLabel("Required output schema").fill('{"type":"object"}');
+  await registration.getByRole("button", { name: "Register", exact: true }).click();
+  const approval = page.getByRole("dialog", { name: "Review the fee budget" });
+  await expect(approval).toBeVisible();
+  await expect(approval).toContainText("Action: register capability");
+  await expect(approval).toContainText("Escrow or collateral value: 10.0000 GEN");
+  expect(await page.evaluate(() => localStorage.getItem("fixture-submissions"))).toBeNull();
+  await page.keyboard.press("Escape");
+  await expect(registration).toBeVisible();
+  await expect(registration.getByLabel("Capability name")).toHaveValue("My independent service");
+});
+
 test("RPC and history failures are announced without fabricated results", async ({ page }) => {
   await page.goto("/?offline");
   await expect(page.getByRole("alert")).toContainText("RPC unavailable");

@@ -22,7 +22,8 @@ function fixture() {
     PUBLIC_BASE_URL: "https://adapter.example", RECOURSE_ADAPTER_URL: "https://adapter.example", FRONTEND_ORIGIN: "https://frontend.example" };
   const frontend = { NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS: address, NEXT_PUBLIC_RECOURSE_CHAIN_ID: "61997", NEXT_PUBLIC_RECOURSE_RPC: metadata.rpc,
     NEXT_PUBLIC_RECOURSE_ADAPTER_URL: backend.PUBLIC_BASE_URL };
-  return { client, counts, metadata, backend, frontend, source };
+  const releaseManifest = { schemaVersion: 1, protocolVersion: 2, ...metadata };
+  return { client, counts, metadata, backend, frontend, source, releaseManifest };
 }
 
 test("deployment verification derives all current methods and requires finalized counts", async () => {
@@ -43,28 +44,44 @@ test("deployment verification rejects wrong chain, stale code, schema, and metad
   await assert.rejects(verifyDeployment({ client: fixture().client, address, source, recordedHash: "stale" }), /Recorded/);
 });
 
-test("release configuration fails closed on any mismatched deployment or origin", () => {
+test("release configuration validates the effective manifest deployment and origins", () => {
   const input = fixture();
   assert.equal(validateReleaseConfiguration(input).contractAddress, address);
-  for (const [section, key, value] of [["backend", "RECOURSE_CONTRACT_ADDRESS", ""], ["backend", "CONTRACT_ADDRESS", `0x${"22".repeat(20)}`],
-    ["frontend", "NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS", ""], ["frontend", "NEXT_PUBLIC_RECOURSE_CHAIN_ID", "1"],
-    ["backend", "RECOURSE_ADAPTER_URL", "https://old.example"], ["frontend", "NEXT_PUBLIC_RECOURSE_RPC", "https://old.example"],
-    ["metadata", "sourceSha256", "old"], ["backend", "FRONTEND_ORIGIN", "http://localhost:3000"]]) {
+  for (const [section, key, value] of [["backend", "RECOURSE_ADAPTER_URL", "https://old.example"],
+    ["releaseManifest", "contractAddress", `0x${"22".repeat(20)}`], ["releaseManifest", "rpc", "https://old.example"],
+    ["releaseManifest", "sourceSha256", "b".repeat(64)], ["metadata", "sourceSha256", "old"], ["backend", "FRONTEND_ORIGIN", "http://localhost:3000"]]) {
     const changed = { ...input, [section]: { ...input[section], [key]: value } };
     assert.throws(() => validateReleaseConfiguration(changed));
   }
 });
 
+test("preflight ignores inactive legacy variables but checks explicit environment overrides", () => {
+  const input = fixture();
+  input.backend.RECOURSE_CONTRACT_ADDRESS = `0x${"22".repeat(20)}`;
+  input.frontend.NEXT_PUBLIC_RECOURSE_RPC = "https://old.example";
+  assert.equal(validateReleaseConfiguration(input).contractAddress, address);
+  input.backend.RECOURSE_DEPLOYMENT_MODE = "environment";
+  assert.throws(() => validateReleaseConfiguration(input));
+  input.backend.RECOURSE_CONTRACT_ADDRESS = address;
+  input.backend.STUDIO_DEV_CHAIN_ID = "61997";
+  assert.equal(validateReleaseConfiguration(input).backendConfigurationSource, "explicit_environment");
+  input.frontend.NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE = "environment";
+  assert.throws(() => validateReleaseConfiguration(input), /Effective deployment/);
+});
+
 test("hosted release checks identities without claiming paid-flow acceptance", async () => {
   const release = validateReleaseConfiguration(fixture());
   const manifestHash = "a".repeat(64);
-  const identity = { chain_id: 61997, protocol_version: 2, contract_address: address, manifest_hash: manifestHash, rpc_url: release.rpc };
+  const identity = { chain_id: 61997, protocol_version: 2, contract_address: address, manifest_hash: manifestHash, rpc_url: release.rpc, source_sha256: description.sourceSha256 };
   const records = { "/agents": { ...identity, provider: `0x${"33".repeat(20)}` }, "/ready": { ...identity, ok: true, readiness: "dependencies_verified" },
     "/api/deployment": { ...identity, adapter_url: release.adapter } };
   const fetcher = async (url) => Response.json(records[new URL(url).pathname]);
   const report = await verifyHostedRelease({ release, manifestHash, fetcher });
   assert.equal(report.configurationConsistent, true);
   assert.equal(report.liveAcceptanceComplete, false);
+  records["/ready"].source_sha256 = "stale";
+  await assert.rejects(verifyHostedRelease({ release, manifestHash, fetcher }), /source identity/);
+  records["/ready"].source_sha256 = description.sourceSha256;
   records["/api/deployment"].manifest_hash = "old";
   await assert.rejects(verifyHostedRelease({ release, manifestHash, fetcher }), /stale/);
   await assert.rejects(verifyHostedRelease({ release, manifestHash, fetcher: async () => new Response("not ready", { status: 503 }) }), /unavailable/);

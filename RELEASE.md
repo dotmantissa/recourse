@@ -28,12 +28,18 @@ are stale. Existing browser settlement, dispute and recovery writes do not depen
 on this availability gate. This is a fail-closed migration safeguard, not an
 assertion that legacy contracts implement protocol-v2 recovery.
 
-`npm run preflight:release` verifies local backend/frontend environment values
-against `deploy/addresses.json` and the current contract source. It fails rather
-than accepting stale metadata or relying on the backend's historical fallback
-address. Configure both `CONTRACT_ADDRESS` and `RECOURSE_CONTRACT_ADDRESS`, the
-frontend address and chain, identical RPCs, and matching adapter/frontend origins.
-It does not test credential validity or change any deployment.
+`deploy/release.json` is the authoritative public contract, chain, RPC, and source
+identity shared by the backend and frontend. Old cloud address variables are
+ignored by default. `npm run preflight:release` validates the effective targets
+against `deploy/addresses.json`, the current source, and matching adapter/frontend
+origins. It does not test credential validity or change any deployment.
+
+Previews can explicitly opt into `RECOURSE_DEPLOYMENT_MODE=environment` on the
+backend and `NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE=environment` on the frontend.
+Then all three corresponding address, chain, and RPC variables are required:
+`RECOURSE_CONTRACT_ADDRESS`, `STUDIO_DEV_CHAIN_ID`, `STUDIO_DEV_RPC`, and
+`NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS`, `NEXT_PUBLIC_RECOURSE_CHAIN_ID`,
+`NEXT_PUBLIC_RECOURSE_RPC`. Exact-source readiness is still mandatory.
 
 ## Preserve the old deployment
 
@@ -52,15 +58,16 @@ It does not test credential validity or change any deployment.
 
 1. Use a separate preview environment and explicitly funded role-specific keys.
    Review the deployment plan, set `DEPLOYMENT_MAX_FEE_WEI`, then authorize
-   `npm run deploy:studio-next -- --run`. The script saves the transaction ID,
+   `npm run deploy:studio-next -- --run --promote`. The script saves the transaction ID,
    verifies source/schema/finality, archives previous metadata locally, and
-   updates both local backend address variables and the frontend address.
+   updates local address variables and atomically promotes the verified public
+   release manifest. Omit `--promote` for an isolated preview deployment.
 2. An interrupted deploy leaves a lock under `.runtime/deployments/`. Reconcile
    its saved transaction or unknown broadcast before removing the lock. The
    script never automatically resends an uncertain deployment.
 3. Configure the preview backend and frontend with the same new contract, RPC,
-   adapter origin, and service manifest. Set the Render contract variable
-   explicitly; the blueprint no longer embeds a historical address. Do not reuse
+   adapter origin, and service manifest. Production services use the committed
+   release manifest; isolated previews require the explicit override mode. Do not reuse
    a service endpoint whose old funded jobs still require incompatible terms.
 4. Configure provider credentials, durable storage, result encryption, and Privy
    for that environment. Register only the five implemented services using the

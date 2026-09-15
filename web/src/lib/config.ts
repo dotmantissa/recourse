@@ -1,7 +1,14 @@
-export const RPC_URL =
-  process.env.NEXT_PUBLIC_RECOURSE_RPC ?? "https://studio-dev.genlayer.com/api";
-export const CHAIN_ID = Number(process.env.NEXT_PUBLIC_RECOURSE_CHAIN_ID ?? "61997");
-export const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS ?? "";
+import releaseManifest from "../../../deploy/release.json";
+import { selectReleaseDeployment } from "../../../sdk/release-config.mjs";
+
+const deployment = selectReleaseDeployment(releaseManifest, { mode: process.env.NEXT_PUBLIC_RECOURSE_DEPLOYMENT_MODE,
+  contractAddress: process.env.NEXT_PUBLIC_RECOURSE_CONTRACT_ADDRESS,
+  chainId: process.env.NEXT_PUBLIC_RECOURSE_CHAIN_ID, rpc: process.env.NEXT_PUBLIC_RECOURSE_RPC });
+export const RPC_URL = deployment.rpc;
+export const CHAIN_ID = deployment.chainId;
+export const CONTRACT_ADDRESS = deployment.contractAddress;
+export const CONFIGURATION_SOURCE = deployment.configurationSource;
+export const CONTRACT_SOURCE_SHA256 = deployment.sourceSha256;
 export const EXPLORER_URL = "https://explorer-studio-dev.genlayer.com/";
 export const MONITOR_ADDRESS = process.env.NEXT_PUBLIC_RECOURSE_MONITOR_ADDRESS ?? "";
 export const ADAPTER_URL = process.env.NEXT_PUBLIC_RECOURSE_ADAPTER_URL ?? "";

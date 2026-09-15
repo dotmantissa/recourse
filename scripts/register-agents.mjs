@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdir, open, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { config } from "dotenv";
 import {
@@ -13,13 +13,19 @@ import { TransactionHashVariant } from "genlayer-js/types";
 import JSONbig from "json-bigint";
 import { AGENT_DEFINITIONS, MANIFEST_HASH, hostedCapabilityMatches } from "../agents/catalog.mjs";
 import { fetchPublicUrl } from "../api/http-safety.mjs";
+import releaseManifest from "../deploy/release.json" with { type: "json" };
+import { selectReleaseDeployment } from "../sdk/release-config.mjs";
+import { verifyDeployment } from "../sdk/deployment.mjs";
+import { retryRpcRead } from "../sdk/rpc-read.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 config({ path: resolve(root, ".env"), quiet: true });
 
 const EXPECTED_CHAIN_ID = 61997;
-const RPC = process.env.STUDIO_DEV_RPC?.trim() || "https://studio-dev.genlayer.com/api";
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS?.trim() || "";
+const deployment = selectReleaseDeployment(releaseManifest, { mode: process.env.RECOURSE_DEPLOYMENT_MODE,
+  contractAddress: process.env.RECOURSE_CONTRACT_ADDRESS, chainId: process.env.STUDIO_DEV_CHAIN_ID, rpc: process.env.STUDIO_DEV_RPC });
+const RPC = deployment.rpc;
+const CONTRACT_ADDRESS = deployment.contractAddress;
 const PROVIDER_KEY = process.env.AGENT_SIGNING_KEY?.trim() || "";
 const ADAPTER_URL = (process.env.RECOURSE_ADAPTER_URL?.trim() || "").replace(/\/+$/, "");
 const PRICE_WEI = BigInt(process.env.AGENT_PRICE_WEI?.trim() || "10000000000000000");
@@ -58,16 +64,16 @@ if (chainId !== EXPECTED_CHAIN_ID) {
   throw new Error(`Refusing agent registration on chain ${chainId}; expected ${EXPECTED_CHAIN_ID}`);
 }
 
-const schema = await client.getContractSchema(CONTRACT_ADDRESS);
-if (!["accept_job", "recover_job", "get_capabilities_page"].every((method) => Object.hasOwn(schema.methods ?? {}, method))) throw new Error("Registration requires protocol v2");
+const source = await readFile(resolve(root, "contracts/Recourse.py"), "utf8");
+await retryRpcRead(() => verifyDeployment({ client, address: CONTRACT_ADDRESS, source, recordedHash: deployment.sourceSha256 }));
 const parser = JSONbig({ storeAsString: true, strict: true });
-const readJson = async (functionName, args = []) => parser.parse(String(await client.readContract({
+const readJson = async (functionName, args = []) => parser.parse(String(await retryRpcRead(() => client.readContract({
   address: CONTRACT_ADDRESS,
   functionName,
   args,
   jsonSafeReturn: true,
   transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
-})));
+}))));
 
 async function write(functionName, args, value = 0n) {
   const fees = await client.estimateTransactionFeesForWrite({
@@ -92,13 +98,13 @@ async function write(functionName, args, value = 0n) {
   });
   await checkpoint({ status: "submitted", hash });
   console.log(`Submitted registration transaction: ${hash}`);
-  const receipt = await client.waitForTransactionReceipt({
+  const receipt = await retryRpcRead(() => client.waitForTransactionReceipt({
     hash,
     waitUntil: "finalized",
     interval: 3000,
     retries: 240,
     fullTransaction: true,
-  });
+  }));
   if (!isSuccessful(receipt)) {
     throw new Error(`${functionName} failed: ${JSON.stringify(receipt)}`);
   }
